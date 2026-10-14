@@ -2,6 +2,11 @@ name: Rollout CI rejection verification
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [denial, full]
+        default: denial
   pull_request:
     branches: [main]
 
@@ -11,7 +16,7 @@ permissions:
 
 jobs:
   assert-denied:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'verify/rollout-ci-denials'
+    if: (github.event_name == 'workflow_dispatch' && inputs.mode != 'full') || github.head_ref == 'verify/rollout-ci-denials'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -40,4 +45,48 @@ jobs:
           assert.equal(response.status, 403);
           assert.equal((await response.json()).error.code, 'forbidden');
           console.log('Signed GitHub OIDC request was rejected with HTTP 403.');
+          NODE
+
+  full-verification:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Verify real CLI bytes, permissions and cleanup
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs/promises';
+          import {tmpdir} from 'node:os';
+          import {join} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          import {githubToken} from './dist/cli/client.js';
+          const fixture={"projectId":"eccb0820-58be-426c-a6e5-824d271c8bc5","environmentId":"a7ea8d3d-8a23-4cdf-9875-c8ceb96bdc08","policyId":"6f232c9a-9b1e-492b-b564-ede50f7eb374","project":"my-app","environment":"ci","secrets":[{"id":"a8fe9fa3-a467-4ebe-8ec3-faeb14694e1e","versionId":"51475ac9-891b-41d6-a5a1-6862c46f23f5","name":"API_TOKEN","kind":"env","bytes":45,"sha256":"72a1e8fb4e22880486182f3c84a2527d9112d2f876357f22d969da7eb1e15f71"},{"id":"a3d6105c-a4dc-4fd3-a343-913ef6901b96","versionId":"8229d27c-c097-4a0c-b829-d9731c30e1ee","name":"SIGNING_KEY","kind":"file","bytes":2877,"sha256":"f95cfdd6fc34bcf0d822e7010c0f428f57bad1eaf8cd87d41c8409460afc0088"}]};
+          const origin='https://psm-ci.dnxprbs.workers.dev';
+          const token=await githubToken(origin);
+          for(let i=0;i<20;i++) {
+            const response=await fetch(origin+'/v1/resolve',{method:'POST',headers:{Authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({project:'my-app',environment:'ci',names:['API_TOKEN','SIGNING_KEY']}),redirect:'error'});
+            assert.equal(response.status,200); const body=await response.json(); assert.equal(body.secrets.length,2);
+          }
+          const childCode=`const assert=require('node:assert/strict'),fs=require('node:fs'),crypto=require('node:crypto'),path=require('node:path');
+          const fixture=JSON.parse(process.env.PSM_FIXTURE_METADATA);
+          for(const item of fixture.secrets){const value=item.kind==='file'?fs.readFileSync(process.env.SIGNING_KEY_FILE):Buffer.from(process.env.API_TOKEN);assert.equal(value.length,item.bytes);assert.equal(crypto.createHash('sha256').update(value).digest('hex'),item.sha256);}
+          assert.equal(fs.statSync(process.env.SIGNING_KEY_FILE).mode&511,384);assert.equal(fs.statSync(path.dirname(process.env.SIGNING_KEY_FILE)).mode&511,448);
+          fs.writeFileSync(process.env.PSM_FILE_MARKER,process.env.SIGNING_KEY_FILE,{mode:384});process.exit(Number(process.env.PSM_EXIT_CODE));`;
+          const marker=join(tmpdir(),'psm-verification-path');
+          for(const code of [0,7]){
+          const result=spawnSync(process.execPath,['dist/cli/index.js','run','--ci','--project','my-app','--env','ci','--config','psm.example.json','--',process.execPath,'-e',childCode],{encoding:'utf8',env:{...process.env,PSM_FIXTURE_METADATA:JSON.stringify(fixture),PSM_FILE_MARKER:marker,PSM_EXIT_CODE:String(code)}});
+          assert.equal(result.status,code);assert.equal(result.stdout,'');assert.equal(result.stderr,'');
+          const path=await fs.readFile(marker,'utf8');assert.equal(await fs.stat(path).then(()=>true,()=>false),false);assert.equal(await fs.stat(join(path,'..')).then(()=>true,()=>false),false);await fs.unlink(marker);
+          }
+          console.log('20 live resolutions passed; exact bytes, SHA256, 0600/0700 modes, exit 0/7 propagation and cleanup passed.');
           NODE
