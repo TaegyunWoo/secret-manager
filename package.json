@@ -3,8 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
-  "bin": { "psm": "dist/cli/index.js" },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "psm": "dist/cli/index.js"
+  },
   "scripts": {
     "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
@@ -14,10 +18,14 @@
     "check": "npm run typecheck && npm test && npm run build",
     "deploy:check": "wrangler deploy --dry-run --config wrangler.admin.jsonc && wrangler deploy --dry-run --config wrangler.ci.jsonc"
   },
-  "dependencies": { "jose": "^6.1.0" },
+  "dependencies": {
+    "jose": "^6.1.0"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261014.1",
+    "@types/jsdom": "21.1.7",
     "@types/node": "^22.0.0",
+    "jsdom": "26.1.0",
     "miniflare": "5.20261006.2-beta",
     "tsx": "^4.0.0",
     "typescript": "^5.9.0",

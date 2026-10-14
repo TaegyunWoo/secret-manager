@@ -1,0 +1,29 @@
+name: Secret consumption example
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Replace example URLs and register a matching CI policy before running.
+      - name: Run a command with declared secrets
+        run: >-
+          node dist/cli/index.js run --ci --project my-app --env ci
+          --config psm.example.json --
+          node -e 'const fs = require("node:fs"); if (!process.env.API_TOKEN || !process.env.SIGNING_KEY_FILE || !fs.existsSync(process.env.SIGNING_KEY_FILE)) process.exit(1); console.log("Declared secrets are available to the child process.");'
