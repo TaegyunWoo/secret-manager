@@ -1,6 +1,6 @@
 {
-  "adminUrl": "https://psm-admin.your-subdomain.workers.dev",
-  "ciUrl": "https://psm-ci.your-subdomain.workers.dev",
+  "adminUrl": "https://psm-admin.dnxprbs.workers.dev",
+  "ciUrl": "https://psm-ci.dnxprbs.workers.dev",
   "secrets": {
     "API_TOKEN": { "name": "API_TOKEN", "kind": "env" },
     "SIGNING_KEY_FILE": { "name": "SIGNING_KEY", "kind": "file" }

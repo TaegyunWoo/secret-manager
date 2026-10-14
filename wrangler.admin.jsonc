@@ -1,6 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "psm-admin",
+  "account_id": "c8a85836c1a70f3119c983822ce493a3",
   "main": "src/admin/index.ts",
   "compatibility_date": "2026-10-01",
   "workers_dev": true,
@@ -8,13 +9,12 @@
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
   "d1_databases": [{
     "binding": "DB", "database_name": "psm",
-    "database_id": "00000000-0000-0000-0000-000000000000",
+    "database_id": "ee54dfa8-b727-4518-ad6d-a40001b27131",
     "migrations_dir": "migrations"
   }],
   "vars": {
-    "ACCESS_ISSUER": "https://your-team.cloudflareaccess.com",
+    "ACCESS_ISSUER": "https://fancy-lab-0bd2.cloudflareaccess.com",
     "ACCESS_AUD": "replace-with-access-application-aud",
-    "ADMIN_EMAIL": "you@example.com",
     "ACTIVE_KEY_ID": "key-2026-10"
   },
   "triggers": { "crons": ["0 * * * *"] },
