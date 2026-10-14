@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig, fail } from './config.js';
 import { login, resolveSecrets } from './client.js';
-import { runCommand } from './run.js';
+import { runCommand, cleanupStaleRuns } from './run.js';
 import { AppError } from '../shared/errors.js';
 
 const usage = `Usage:
@@ -27,6 +27,7 @@ async function main(): Promise<void> {
   }
   if (action === 'run' && (!project || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(project) || project.length > 128 || !environment || environment.length > 128 || environment.trim() !== environment || /[\x00-\x1f\x7f]/.test(environment) || !command.length || !command[0])) fail('invalid_usage');
   const config = await loadConfig(path);
+  await cleanupStaleRuns();
   if (action === 'login') { await login(config); process.stdout.write('Access login complete.\n'); return; }
   const values = await resolveSecrets(config,project!,environment!,ci);
   const result = await runCommand(config,values,command);

@@ -164,3 +164,44 @@ test('CI resolution remains on authorized environment ID when names change durin
   try { assert.deepEqual(await json(await call('/v1/resolve','POST',{project:project.slug,environment:'prod',names:['TOKEN']},{},'ci')),{secrets:[{name:'TOKEN',kind:'env',value:'private-plaintext'}]}); }
   finally {Store.prototype.getEnvironment=lookup;}
 });
+
+
+for(const revoke of ['disable','delete']) test(`policy PATCH preserves concurrent ${revoke}`,async () => {
+  const {environment}=await fixture();
+    const policy=await store.savePolicy({environmentId:environment.id,repositoryId:'123',repositoryOwnerId:'456',branch:'refs/heads/main',workflow:'.github/workflows/deploy.yml',events:['push'],githubEnvironment:null,active:true});
+    const batch=Store.prototype.batch; let intercepted=false;
+    // D1 prepared statements are opaque; gate the first policy mutation, before its real SQL executes.
+    Store.prototype.batch=async function(statements) {
+      if(!intercepted) {
+        intercepted=true;
+        if(revoke==='disable')await data.db.prepare('UPDATE ci_policies SET active=0 WHERE id=?').bind(policy.id).run();
+        else await data.db.prepare('DELETE FROM ci_policies WHERE id=?').bind(policy.id).run();
+      }
+      return batch.call(this,statements);
+    };
+    try {
+      const result=await json(await call(`/api/ci-policies/${policy.id}`,'PATCH',{workflow:'.github/workflows/new.yml'}),revoke==='delete'?404:200);
+      const policies=(await store.listPolicies()).filter(item=>item.id===policy.id);
+      if(revoke==='delete')assert.deepEqual(policies,[]);
+      else { assert.equal(result.active,false);assert.equal(policies[0]!.active,false);assert.equal(policies[0]!.workflow,'.github/workflows/new.yml'); }
+    } finally {Store.prototype.batch=batch;}
+});
+
+test('resolve and import audits retain validated environment context on successes and errors',async () => {
+  const {project,environment}=await fixture();
+  for(const [path,input,status,action] of [
+    ['/api/resolve',{project:project.slug,environment:'prod',names:['TOKEN']},200,'secrets.resolve'],
+    ['/api/resolve',{project:project.slug,environment:'prod',names:['MISSING']},404,'secrets.resolve'],
+    ['/api/imports/preview',{environmentId:environment.id,source:'NEW=value'},200,'imports.preview'],
+    ['/api/imports/preview',{environmentId:environment.id,source:'broken'},400,'imports.preview'],
+    ['/api/imports/apply',{environmentId:environment.id,entries:[{name:'NEW',value:'value'}]},200,'imports.apply'],
+    ['/api/imports/apply',{environmentId:environment.id,entries:[{name:'TOKEN',value:'value'}]},409,'imports.apply'],
+  ] as const) {
+    const previous=new Set((await store.listAudit(500)).map(event=>event.id));
+    await json(await call(path,'POST',input),status);
+    const events=(await store.listAudit(500)).filter(event=>!previous.has(event.id));
+    assert.equal(events.length,1);assert.equal(events[0]!.action,action);assert.equal(events[0]!.targetId,environment.id);assert.equal(events[0]!.result,status===200?'success':'error');
+  }
+  await json(await call('/api/imports/preview','POST',{environmentId:environment.id,source:'NEW=value'},{Origin:'https://evil.example'}),403);
+  assert.ok((await store.listAudit(500)).some(event=>event.action==='imports.preview'&&event.result==='denied'&&event.targetId===null));
+});

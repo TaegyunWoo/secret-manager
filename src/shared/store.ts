@@ -13,14 +13,20 @@ export function validText(value: unknown, max = 128): asserts value is string { 
 export function validName(value: unknown): asserts value is string { if (typeof value !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(value) || ['__proto__', 'prototype', 'constructor'].includes(value)) invalid(); }
 export function validValue(value: unknown): asserts value is string { if (typeof value !== 'string' || new TextEncoder().encode(value).length > MAX_VALUE_BYTES) invalid(); }
 export function validKind(value: unknown): asserts value is 'env' | 'file' { if (value !== 'env' && value !== 'file') invalid(); }
-export function validPolicy(policy: Omit<CiPolicy, 'id'> & { id?: string }): void {
-  validId(policy.environmentId); if (policy.id !== undefined) validId(policy.id);
-  if (typeof policy.repositoryId !== 'string' || typeof policy.repositoryOwnerId !== 'string' || !/^[1-9][0-9]{0,31}$/.test(policy.repositoryId) || !/^[1-9][0-9]{0,31}$/.test(policy.repositoryOwnerId)) invalid();
-  validText(policy.branch, 256); validText(policy.workflow, 256);
-  if (!/^refs\/heads\/[^\s~^:?*\[\\]+$/.test(policy.branch) || !/^\.github\/workflows\/[^\s/@\\]+\.ya?ml$/.test(policy.workflow)) invalid();
-  if (!Array.isArray(policy.events) || policy.events.length < 1 || policy.events.length > 2 || new Set(policy.events).size !== policy.events.length || policy.events.some(e => !['push', 'workflow_dispatch'].includes(e))) invalid();
-  if (policy.githubEnvironment !== null) validText(policy.githubEnvironment);
-  if (typeof policy.active !== 'boolean') invalid();
+const policyColumns = {environmentId:'environment_id',repositoryId:'repository_id',repositoryOwnerId:'repository_owner_id',branch:'branch',workflow:'workflow',events:'events',githubEnvironment:'github_environment',active:'active'};
+function validatePolicy(input: Partial<Omit<CiPolicy,'id'>>, partial: boolean): void {
+  if (Object.keys(input).some(key => !Object.hasOwn(policyColumns,key))) invalid();
+  const supplied = (key: keyof typeof policyColumns) => !partial || Object.hasOwn(input,key);
+  if (supplied('environmentId')) validId(input.environmentId);
+  for (const key of ['repositoryId','repositoryOwnerId'] as const) if (supplied(key) && (typeof input[key] !== 'string' || !/^[1-9][0-9]{0,31}$/.test(input[key]))) invalid();
+  if (supplied('branch')) { validText(input.branch,256); if (!/^refs\/heads\/[^\s~^:?*\[\\]+$/.test(input.branch)) invalid(); }
+  if (supplied('workflow')) { validText(input.workflow,256); if (!/^\.github\/workflows\/[^\s/@\\]+\.ya?ml$/.test(input.workflow)) invalid(); }
+  if (supplied('events') && (!Array.isArray(input.events) || input.events.length < 1 || input.events.length > 2 || new Set(input.events).size !== input.events.length || input.events.some(e => !['push','workflow_dispatch'].includes(e)))) invalid();
+  if (supplied('githubEnvironment') && input.githubEnvironment !== null) validText(input.githubEnvironment);
+  if (supplied('active') && typeof input.active !== 'boolean') invalid();
+}
+export function validPolicy(policy: Omit<CiPolicy,'id'> & {id?:string}): void {
+  const {id,...input}=policy; if (id !== undefined) validId(id); validatePolicy(input,false);
 }
 interface JoinedSecret extends Secret, CipherRecord { projectId: string }
 interface Write extends Secret, CipherRecord { expectedVersionId: string | null }
@@ -128,6 +134,13 @@ export class Store {
   async savePolicy(input: Omit<CiPolicy, 'id'> & {id?: string}): Promise<CiPolicy> {
     validPolicy(input); const policy: CiPolicy = {id: input.id ?? crypto.randomUUID(), environmentId: input.environmentId, repositoryId: input.repositoryId, repositoryOwnerId: input.repositoryOwnerId, branch: input.branch, workflow: input.workflow, events: [...input.events], githubEnvironment: input.githubEnvironment, active: input.active};
     await this.mutate('INSERT INTO ci_policies(id,environment_id,repository_id,repository_owner_id,branch,workflow,events,github_environment,active) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET environment_id=excluded.environment_id,repository_id=excluded.repository_id,repository_owner_id=excluded.repository_owner_id,branch=excluded.branch,workflow=excluded.workflow,events=excluded.events,github_environment=excluded.github_environment,active=excluded.active', policy.id, policy.environmentId, policy.repositoryId, policy.repositoryOwnerId, policy.branch, policy.workflow, JSON.stringify(policy.events), policy.githubEnvironment, Number(policy.active)); return policy;
+  }
+  async updatePolicy(id: string, input: Partial<Omit<CiPolicy,'id'>>): Promise<CiPolicy> {
+    validId(id); validatePolicy(input,true);
+    const fields=Object.keys(input) as (keyof typeof policyColumns)[]; if (!fields.length) invalid();
+    const values=fields.map(field => field==='events' ? JSON.stringify(input.events) : field==='active' ? Number(input.active) : input[field]);
+    await this.mutate(`UPDATE ci_policies SET ${fields.map(field=>`${policyColumns[field]}=?`).join(',')} WHERE id=?`,...values,id);
+    const policy=(await this.listPolicies()).find(policy=>policy.id===id); if (!policy) throw new AppError(404,'not_found'); return policy;
   }
   async deletePolicy(id: string): Promise<void> { validId(id); await this.mutate('DELETE FROM ci_policies WHERE id=?', id); }
   listAudit(limit = 100): Promise<AuditEvent[]> { if (!Number.isInteger(limit) || limit < 1 || limit > 500) invalid(); return this.rows('SELECT id,actor,action,target_id AS targetId,result,created_at AS createdAt FROM audit_events WHERE created_at>? ORDER BY created_at DESC,id DESC LIMIT ?', Date.now() - 30 * DAY, limit); }

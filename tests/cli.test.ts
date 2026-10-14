@@ -199,3 +199,45 @@ test('HTTP reader rejects streamed overflow, invalid JSON and redirects', async(
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const url=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
   try {for(mode of ['overflow','invalid','redirect'])await assert.rejects(requestJson(url,{},64),/request_failed/);}finally{await new Promise<void>(done=>server.close(()=>done()));}
 });
+
+
+for(const action of ['env','login','failed']) test(`valid CLI startup (${action}) cleans stale files without creating an absent root`,async()=>{
+    const f=await fixture();try {
+      const config=JSON.parse(await fs.readFile(f.config,'utf8'));config.secrets={API_TOKEN:{name:'TOKEN',kind:'env'}};await fs.writeFile(f.config,JSON.stringify(config));
+      f.setResponse({secrets:[{name:'TOKEN',kind:'env',value:secret}]},action==='failed'?500:200);
+      const execute=()=>action==='login'?f.launch(['login','--config',f.config]).result:f.run('process.exit(0)').result;
+      await execute();await assert.rejects(fs.stat(f.root));
+      await fs.mkdir(f.root,{mode:0o700});const stale=join(f.root,'run-2147483647-123456789abcdef0');await fs.mkdir(stale,{mode:0o700});
+      await fs.writeFile(join(stale,'.preparing'),'',{mode:0o600});await fs.writeFile(join(stale,'KEY'),fileValue,{mode:0o600});
+      assert.equal((await execute()).code,action==='failed'?1:0);await assert.rejects(fs.stat(stale));
+    }finally{await f.close();}
+});
+
+test('SIGTERM reaches an npm foreground wrapper and retains files until its workload finishes',async()=>{
+  const f=await fixture();let appPid:number|undefined;let running:ReturnType<typeof f.launch>|undefined;
+  try {
+    const ready=join(f.dir,'wrapper-ready'),seen=join(f.dir,'wrapper-seen');
+    await fs.writeFile(join(f.dir,'package.json'),JSON.stringify({scripts:{dev:'node app.cjs; exit $?'}}));
+    await fs.writeFile(join(f.dir,'app.cjs'),`const fs=require('fs');process.on('SIGTERM',()=>{setTimeout(()=>{fs.writeFileSync(${JSON.stringify(seen)},fs.readFileSync(process.env.SIGNING_KEY_FILE));process.exit(0)},300)});fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid,path:process.env.SIGNING_KEY_FILE}));setInterval(()=>{},100);`);
+    running=f.launch(['run','--project','app','--env','dev','--config',f.config,'--','npm','--prefix',f.dir,'run','dev']);
+    const info=JSON.parse(await waitFile(ready));appPid=info.pid;running.child.kill('SIGTERM');
+    await new Promise(r=>setTimeout(r,100));assert.equal(await fs.readFile(info.path,'utf8'),fileValue);
+    const outcome=await Promise.race([running.result,new Promise<null>(r=>setTimeout(()=>r(null),2500))]);
+    assert.ok(outcome,'foreground workload did not stop after SIGTERM');assert.equal(outcome.signal,'SIGTERM');
+    assert.equal(await fs.readFile(seen,'utf8'),fileValue);assert.deepEqual(await fs.readdir(f.root),[]);
+  }finally{
+    if(appPid){try{process.kill(appPid,'SIGKILL');}catch{}}if(running){running.child.kill('SIGKILL');await running.result;}await f.close();
+  }
+});
+
+test('startup retains a live process group after its leader dies',async()=>{
+  const f=await fixture();let descendant:number|undefined;
+  const leader=spawn(process.execPath,['-e',`const {spawn}=require('child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});child.unref();console.log(child.pid);`],{detached:true,stdio:['ignore','pipe','ignore']});
+  try {
+    let output='';for await(const bytes of leader.stdout!)output+=bytes;descendant=Number(output.trim());
+    await new Promise<void>(done=>leader.exitCode!==null?done():leader.once('exit',()=>done()));
+    await fs.mkdir(f.root,{mode:0o700});const orphan=join(f.root,'run-2147483647-0123456789abcdef');await fs.mkdir(orphan,{mode:0o700});
+    await fs.writeFile(join(orphan,'.preparing'),'',{mode:0o600});await fs.writeFile(join(orphan,`.group-${leader.pid}`),'',{mode:0o600});await fs.writeFile(join(orphan,'KEY'),fileValue,{mode:0o600});
+    assert.equal((await f.run('process.exit(0)').result).code,0);assert.equal(await fs.readFile(join(orphan,'KEY'),'utf8'),fileValue);
+  }finally {if(descendant){try{process.kill(descendant,'SIGKILL');}catch{}}await f.close();}
+});

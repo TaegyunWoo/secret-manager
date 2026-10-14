@@ -226,7 +226,7 @@ test('CI policy form creates exact constraints then edits disables and deletes',
     await h.submit();
     assert.deepEqual(h.requests.find((r) => r.path === '/api/ci-policies' && r.method === 'POST')!.body, { environmentId: 'e1', repositoryId: '123', repositoryOwnerId: '456', branch: 'refs/heads/main', workflow: '.github/workflows/deploy.yml', events: ['workflow_dispatch'], githubEnvironment: null, active: true });
     await h.click('정책 편집'); h.input('repositoryId', '789'); await h.submit();
-    assert.equal(h.requests.find((r) => r.path === '/api/ci-policies/policy1' && r.method === 'PATCH')!.body.repositoryId, '789');
+    assert.deepEqual(h.requests.find((r) => r.path === '/api/ci-policies/policy1' && r.method === 'PATCH')!.body, { repositoryId: '789' });
     await h.click('비활성화');
     assert.ok(h.requests.some((r) => r.path === '/api/ci-policies/policy1' && r.method === 'PATCH' && r.body.active === false));
     await h.click('정책 삭제'); await h.click('삭제 확인');
@@ -455,4 +455,16 @@ test('an old project environment response cannot replace the workspace after ano
     assert.match(h.doc.querySelector('#view')!.textContent!, /SECOND_PROJECT/);
     assert.equal(h.requests.some((r) => r.path === '/api/secrets?environmentId=e1'), false);
   } finally { h.dom.window.close(); }
+});
+
+
+test('policy edit no-op avoids PATCH and an explicit checkbox change activates the policy',async()=>{
+  const policy={id:'policy1',environmentId:'e1',repositoryId:'123',repositoryOwnerId:'456',branch:'refs/heads/main',workflow:'.github/workflows/deploy.yml',events:['workflow_dispatch'],githubEnvironment:null,active:false};
+  const h=await setup(r=>r.path.startsWith('/api/ci-policies?')?{policies:[policy]}:undefined);
+  try {
+    await h.click('CI 정책');await h.click('정책 편집');await h.submit();
+    assert.equal(h.requests.filter(r=>r.method==='PATCH').length,0);assert.equal((h.doc.querySelector('#dialog') as HTMLDialogElement).open,false);
+    await h.click('정책 편집');(h.doc.querySelector('[name="active"]') as HTMLInputElement).checked=true;await h.submit();
+    assert.deepEqual(h.requests.find(r=>r.method==='PATCH')!.body,{active:true});
+  }finally{h.dom.window.close();}
 });

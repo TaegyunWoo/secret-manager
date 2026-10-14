@@ -166,3 +166,16 @@ test('ID-based resolution remains pinned after environment names change', async 
   await store.createSecret({environmentId:replacement.id,name:'KEY',kind:'env',value:'other'});
   assert.equal((await store.resolveEnvironment(approved.id,['KEY'])).secrets[0]?.value,'authorized');
 });
+
+
+test('policy field updates validate supplied values and explicitly activate without rewriting other fields',async t=>{
+  const {store,environment}=await setup(t);
+  const original=await store.savePolicy({environmentId:environment.id,repositoryId:'123',repositoryOwnerId:'456',branch:'refs/heads/main',workflow:'.github/workflows/deploy.yml',events:['push'],githubEnvironment:null,active:true});
+  for(const input of [{},{active:'yes'},{environmentId:'bad'},{repositoryId:'0123'},{repositoryOwnerId:'x'},{branch:'refs/tags/main'},{workflow:'../deploy.yml'},{events:[]},{githubEnvironment:' unsafe '},{unexpected:'value'}]) {
+    await assert.rejects(store.updatePolicy(original.id,input as any),{code:'invalid_input'});
+    assert.deepEqual((await store.listPolicies())[0],original);
+  }
+  assert.equal((await store.updatePolicy(original.id,{active:false})).active,false);
+  const edited=await store.updatePolicy(original.id,{workflow:'.github/workflows/new.yml'});assert.equal(edited.active,false);
+  assert.deepEqual(await store.updatePolicy(original.id,{active:true}),{...original,workflow:'.github/workflows/new.yml'});
+});

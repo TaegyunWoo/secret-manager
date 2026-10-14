@@ -11,7 +11,7 @@ import type { SecretInput, SecretUpdate, ImportEntry } from '../shared/types.js'
 export interface AdminEnv extends StorageEnv, AccessConfig { ASSETS: Pick<Fetcher, 'fetch'> }
 interface Route {
   method: string; pattern: RegExp; action: string; fields?: string[];
-  run(store: Store, match: RegExpMatchArray, body: unknown, url: URL): Promise<unknown>;
+  run(store: Store, match: RegExpMatchArray, body: unknown, url: URL, target: (id: string) => void): Promise<unknown>;
   status?: number;
 }
 function body<T>(value: unknown): T { return value as T; }
@@ -36,20 +36,17 @@ const routes: Route[] = [
   {method:'POST',pattern:/^\/api\/secrets\/([^/]+)\/versions\/([^/]+)\/restore$/,action:'versions.restore',fields:['expectedVersionId'],run:async(s,m,b)=>s.restoreVersion(m[1]!,m[2]!,expected(b))},
   {method:'GET',pattern:/^\/api\/trash$/,action:'trash.list',run:async(s,_m,_b,u)=>({secrets:await s.listTrash(filter(u,'environmentId'))})},
   {method:'POST',pattern:/^\/api\/trash\/([^/]+)\/restore$/,action:'trash.restore',fields:['expectedVersionId'],run:async(s,m,b)=>s.restoreSecret(m[1]!,expected(b))},
-  {method:'POST',pattern:/^\/api\/imports\/preview$/,action:'imports.preview',fields:['environmentId','source'],run:async(s,_m,b)=>{const input=body<{environmentId:string;source:string}>(b);validId(input.environmentId);return previewImport(s,input.environmentId,input.source);}},
-  {method:'POST',pattern:/^\/api\/imports\/apply$/,action:'imports.apply',fields:['environmentId','entries'],run:async(s,_m,b)=>{
-    const input=body<{environmentId:string;entries:unknown}>(b);
+  {method:'POST',pattern:/^\/api\/imports\/preview$/,action:'imports.preview',fields:['environmentId','source'],run:async(s,_m,b,_u,target)=>{const input=body<{environmentId:string;source:string}>(b);validId(input.environmentId);target(input.environmentId);return previewImport(s,input.environmentId,input.source);}},
+  {method:'POST',pattern:/^\/api\/imports\/apply$/,action:'imports.apply',fields:['environmentId','entries'],run:async(s,_m,b,_u,target)=>{
+    const input=body<{environmentId:string;entries:unknown}>(b);validId(input.environmentId);target(input.environmentId);
     if(!Array.isArray(input.entries)) invalid();
     const entries=input.entries.map(entry=>objectInput<ImportEntry>(entry,['name','value','expectedVersionId']));
     return {secrets:await applyImport(s,input.environmentId,entries)};
   }},
-  {method:'POST',pattern:/^\/api\/resolve$/,action:'secrets.resolve',fields:['project','environment','names'],run:async(s,_m,b)=>{const input=resolveInput(b);return s.resolve(input.project,input.environment,input.names);}},
+  {method:'POST',pattern:/^\/api\/resolve$/,action:'secrets.resolve',fields:['project','environment','names'],run:async(s,_m,b,_u,target)=>{const input=resolveInput(b);const environment=await s.getEnvironment(input.project,input.environment);target(environment.id);return s.resolveEnvironment(environment.id,input.names);}},
   {method:'GET',pattern:/^\/api\/ci-policies$/,action:'policies.list',run:async(s,_m,_b,u)=>({policies:await s.listPolicies(filter(u,'environmentId'))})},
   {method:'POST',pattern:/^\/api\/ci-policies$/,action:'policies.create',fields:policyFields,status:201,run:async(s,_m,b)=>s.savePolicy(body<Omit<CiPolicy,'id'>>(b))},
-  {method:'PATCH',pattern:/^\/api\/ci-policies\/([^/]+)$/,action:'policies.update',fields:policyFields,run:async(s,m,b)=>{
-    const old=(await s.listPolicies()).find(policy=>policy.id===m[1]);if(!old)throw new AppError(404,'not_found');
-    return s.savePolicy({...old,...body<Partial<Omit<CiPolicy,'id'>>>(b),id:m[1]!});
-  }},
+  {method:'PATCH',pattern:/^\/api\/ci-policies\/([^/]+)$/,action:'policies.update',fields:policyFields,run:async(s,m,b)=>s.updatePolicy(m[1]!,body<Partial<Omit<CiPolicy,'id'>>>(b))},
   {method:'DELETE',pattern:/^\/api\/ci-policies\/([^/]+)$/,action:'policies.delete',fields:[],run:async(s,m)=>{await s.deletePolicy(m[1]!);return {ok:true};}},
   {method:'GET',pattern:/^\/api\/audit-events$/,action:'audit.list',run:async(s,_m,_b,u)=>({events:await s.listAudit(u.searchParams.has('limit')?Number(u.searchParams.get('limit')):100)})},
   {method:'GET',pattern:/^\/api\/backup$/,action:'backup.export',run:async s=>exportBackup(s)},
@@ -82,7 +79,7 @@ export function createAdminHandler(jwks?: JWTVerifyGetKey) {
           assertSameOrigin(request);input=await readJson(request);
           if(route.fields)input=objectInput(input,route.fields);
         }
-        const result=await route.run(configuredStore(env),match,input,url);
+        const result=await route.run(configuredStore(env),match,input,url,id=>{validId(id);targetId=id;});
         if(targetId===null && result && typeof result==='object' && 'id' in result){validId(result.id);targetId=result.id;}
         await auditStore.audit({actor,action,targetId,result:'success'});
         return jsonResponse(result,route.status);

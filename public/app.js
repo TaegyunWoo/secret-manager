@@ -444,10 +444,15 @@
     const f = form(content, '저장', () => {
       const events = [push.checked ? 'push' : null, dispatch.checked ? 'workflow_dispatch' : null].filter(Boolean);
       if (!events.length) { message('허용할 이벤트를 하나 이상 선택하세요.', true); return; }
-      return saved(policy ? `/ci-policies/${encodeURIComponent(policy.id)}` : '/ci-policies', policy ? 'PATCH' : 'POST', {
+      const input = {
         environmentId, repositoryId: repositoryId.value, repositoryOwnerId: repositoryOwnerId.value,
         branch: branch.value, workflow: workflow.value, events, githubEnvironment: githubEnvironment.value || null, active: active.checked,
-      }, scope());
+      };
+      if (policy) {
+        for (const key of Object.keys(input)) if (JSON.stringify(input[key]) === JSON.stringify(policy[key])) delete input[key];
+        if (!Object.keys(input).length) { closeDialog(); return loadView(); }
+      }
+      return saved(policy ? `/ci-policies/${encodeURIComponent(policy.id)}` : '/ci-policies', policy ? 'PATCH' : 'POST', input, scope());
     });
     const repositoryId = field(f.node, 'Repository ID', 'repositoryId', 'text', policy?.repositoryId ?? '', { required: true, inputmode: 'numeric', pattern: '[0-9]+' });
     const repositoryOwnerId = field(f.node, 'Repository owner ID', 'repositoryOwnerId', 'text', policy?.repositoryOwnerId ?? '', { required: true, inputmode: 'numeric', pattern: '[0-9]+' });
