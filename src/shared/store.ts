@@ -29,7 +29,7 @@ export function validPolicy(policy: Omit<CiPolicy,'id'> & {id?:string}): void {
   const {id,...input}=policy; if (id !== undefined) validId(id); validatePolicy(input,false);
 }
 interface JoinedSecret extends Secret, CipherRecord { projectId: string }
-interface Write extends Secret, CipherRecord { expectedVersionId: string | null }
+export interface PreparedWrite extends Secret, CipherRecord { expectedVersionId: string | null }
 export class Store {
   constructor(public readonly db: D1Database, public readonly keyring: Keyring, public readonly activeKeyId: string) {}
   statement(sql: string, ...args: unknown[]): D1PreparedStatement { return this.db.prepare(sql).bind(...args); }
@@ -75,15 +75,18 @@ export class Store {
     const cipher = await encrypt(value, {projectId: old.projectId, environmentId: old.environmentId, secretId: id, versionId: metadata.currentVersionId}, this.keyring, this.activeKeyId);
     await this.write([{...metadata, ...cipher, expectedVersionId: input.expectedVersionId}]); return metadata;
   }
-  private async write(writes: Write[]): Promise<void> {
+  private async write(writes: PreparedWrite[]): Promise<void> {
     const payload = JSON.stringify(writes);
+    await this.batch(this.importWriteStatements('(SELECT value FROM json_each(?))',[payload]));
+  }
+  importWriteStatements(source: string, params: unknown[]): D1PreparedStatement[] {
     // A stale CAS must fail a constraint: zero affected rows does not roll back D1 batches.
-    await this.batch([
-      this.statement(`INSERT INTO secrets(id,environment_id,name,kind,current_version_id,deleted_at,created_at,updated_at) SELECT value->>'id',value->>'environmentId',value->>'name',value->>'kind',value->>'currentVersionId',NULL,value->>'createdAt',value->>'updatedAt' FROM json_each(?) WHERE value->>'expectedVersionId' IS NULL`, payload),
-      this.statement(`INSERT INTO secret_versions(id,secret_id,ciphertext,nonce,key_id,created_at) SELECT value->>'currentVersionId',(SELECT id FROM secrets WHERE id=value->>'id' AND deleted_at IS NULL AND current_version_id=coalesce(value->>'expectedVersionId',value->>'currentVersionId')),value->>'ciphertext',value->>'nonce',value->>'keyId',value->>'updatedAt' FROM json_each(?)`, payload),
-      this.statement(`UPDATE secrets SET name=j.value->>'name',kind=j.value->>'kind',current_version_id=j.value->>'currentVersionId',updated_at=j.value->>'updatedAt' FROM json_each(?) j WHERE secrets.id=j.value->>'id'`, payload),
-      this.statement(`DELETE FROM secret_versions WHERE id IN (SELECT id FROM (SELECT id,row_number() OVER (PARTITION BY secret_id ORDER BY created_at DESC,id DESC) AS position FROM secret_versions WHERE secret_id IN (SELECT value->>'id' FROM json_each(?))) WHERE position>10)`, payload)
-    ]);
+    return [
+      this.statement(`INSERT INTO secrets(id,environment_id,name,kind,current_version_id,deleted_at,created_at,updated_at) SELECT value->>'id',value->>'environmentId',value->>'name',value->>'kind',value->>'currentVersionId',NULL,value->>'createdAt',value->>'updatedAt' FROM ${source} WHERE value->>'expectedVersionId' IS NULL`, ...params),
+      this.statement(`INSERT INTO secret_versions(id,secret_id,ciphertext,nonce,key_id,created_at) SELECT value->>'currentVersionId',(SELECT id FROM secrets WHERE id=value->>'id' AND deleted_at IS NULL AND current_version_id=coalesce(value->>'expectedVersionId',value->>'currentVersionId')),value->>'ciphertext',value->>'nonce',value->>'keyId',value->>'updatedAt' FROM ${source}`, ...params),
+      this.statement(`UPDATE secrets SET name=j.value->>'name',kind=j.value->>'kind',current_version_id=j.value->>'currentVersionId',updated_at=j.value->>'updatedAt' FROM ${source} j WHERE secrets.id=j.value->>'id'`, ...params),
+      this.statement(`DELETE FROM secret_versions WHERE id IN (SELECT id FROM (SELECT id,row_number() OVER (PARTITION BY secret_id ORDER BY created_at DESC,id DESC) AS position FROM secret_versions WHERE secret_id IN (SELECT value->>'id' FROM ${source})) WHERE position>10)`, ...params)
+    ];
   }
   async deleteSecret(id: string, expectedVersionId: string): Promise<void> {
     validId(id); validId(expectedVersionId); const now = Date.now();
@@ -103,18 +106,36 @@ export class Store {
   async resolveEnvironment(environmentId: string, names: string[]): Promise<{secrets: ResolvedSecret[]}> {
     validId(environmentId);
     if (!Array.isArray(names) || !names.length || names.length > 100 || new Set(names).size !== names.length) invalid(); names.forEach(validName);
-    const rows = await this.rows<JoinedSecret>(`SELECT s.id,s.environment_id AS environmentId,s.name,s.kind,s.current_version_id AS currentVersionId,e.project_id AS projectId,v.ciphertext,v.nonce,v.key_id AS keyId FROM secrets s JOIN environments e ON e.id=s.environment_id JOIN secret_versions v ON v.id=s.current_version_id AND v.secret_id=s.id WHERE s.environment_id=? AND s.deleted_at IS NULL AND s.name IN (SELECT value FROM json_each(?))`, environmentId, JSON.stringify(names));
+    if (names.length > 10) throw new AppError(413, 'chunk_required');
+    const sizes = await this.rows<{bytes:number}>(`SELECT length(v.ciphertext) AS bytes FROM secrets s JOIN secret_versions v ON v.id=s.current_version_id AND v.secret_id=s.id WHERE s.environment_id=? AND s.deleted_at IS NULL AND s.name IN (SELECT value FROM json_each(?))`,environmentId,JSON.stringify(names));
+    if (sizes.length !== names.length) throw new AppError(404, 'not_found');
+    if (sizes.reduce((total,row) => total + row.bytes,0) > 87404) throw new AppError(413, 'chunk_required');
+    const selection='FROM secrets s JOIN secret_versions v ON v.id=s.current_version_id AND v.secret_id=s.id WHERE s.environment_id=? AND s.deleted_at IS NULL AND s.name IN (SELECT value FROM json_each(?))';
+    const params=[environmentId,JSON.stringify(names)];
+    const snapshot=await this.batch([
+      this.statement(`SELECT count(*) AS count,coalesce(sum(length(v.ciphertext)),0) AS bytes ${selection}`,...params),
+      this.statement(`SELECT s.id,s.environment_id AS environmentId,s.name,s.kind,s.current_version_id AS currentVersionId,e.project_id AS projectId,v.ciphertext,v.nonce,v.key_id AS keyId FROM secrets s JOIN environments e ON e.id=s.environment_id JOIN secret_versions v ON v.id=s.current_version_id AND v.secret_id=s.id WHERE s.environment_id=? AND s.deleted_at IS NULL AND s.name IN (SELECT value FROM json_each(?)) AND (SELECT coalesce(sum(length(v.ciphertext)),0) ${selection})<=87404`,...params,...params)
+    ]);
+    const actual=snapshot[0]!.results[0] as {count:number;bytes:number};
+    if(actual.count!==names.length)throw new AppError(404,'not_found');
+    if(actual.bytes>87404)throw new AppError(413,'chunk_required');
+    const rows=snapshot[1]!.results as JoinedSecret[];
     if (rows.length !== names.length) throw new AppError(404, 'not_found');
     const byName = new Map(rows.map(row => [row.name, row]));
     return {secrets: await Promise.all(names.map(async name => { const row = byName.get(name)!; return {name, kind: row.kind, value: await this.decryptRow(row)}; }))};
   }
   async importEntries(environmentId: string, entries: ImportEntry[]): Promise<Secret[]> {
+    const writes = await this.prepareImportEntries(environmentId,entries);
+    await this.write(writes);
+    return writes.map(({ciphertext: _c, nonce: _n, keyId: _k, expectedVersionId: _e, ...metadata}) => metadata);
+  }
+  async prepareImportEntries(environmentId: string, entries: ImportEntry[]): Promise<PreparedWrite[]> {
     validId(environmentId); if (!Array.isArray(entries) || !entries.length || entries.length > 100 || new Set(entries.map(e => e.name)).size !== entries.length) invalid();
     for (const e of entries) { validName(e.name); validValue(e.value); if (e.expectedVersionId !== undefined) validId(e.expectedVersionId); }
     if (new TextEncoder().encode(JSON.stringify(entries)).length > MAX_IMPORT_BYTES) invalid();
     const environment = await this.one<Environment>(`SELECT ${environmentColumns} FROM environments WHERE id=?`, environmentId);
     const existing = await this.rows<Secret>(`SELECT ${secretColumns} FROM secrets WHERE environment_id=? AND name IN (SELECT value->>'name' FROM json_each(?))`, environmentId, JSON.stringify(entries));
-    const byName = new Map(existing.map(s => [s.name, s])); const writes: Write[] = [];
+    const byName = new Map(existing.map(s => [s.name, s])); const writes: PreparedWrite[] = [];
     for (const entry of entries) {
       const old = byName.get(entry.name);
       if ((old && (old.deletedAt !== null || entry.expectedVersionId !== old.currentVersionId)) || (!old && entry.expectedVersionId !== undefined)) throw new AppError(409, 'conflict');
@@ -123,8 +144,7 @@ export class Store {
       const cipher = await encrypt(entry.value, {projectId: environment.projectId, environmentId, secretId: metadata.id, versionId: metadata.currentVersionId}, this.keyring, this.activeKeyId);
       writes.push({...metadata, ...cipher, expectedVersionId: entry.expectedVersionId ?? null});
     }
-    await this.write(writes);
-    return writes.map(({ciphertext: _c, nonce: _n, keyId: _k, expectedVersionId: _e, ...metadata}) => metadata);
+    return writes;
   }
   async listPolicies(environmentId?: string, activeOnly = false): Promise<CiPolicy[]> {
     if (environmentId !== undefined) validId(environmentId);
@@ -148,8 +168,9 @@ export class Store {
   async cleanup(limit = 100): Promise<{secrets: number; events: number}> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) invalid(); const now = Date.now();
     const results = await this.batch([
+      this.statement('DELETE FROM staged_operations WHERE id IN (SELECT id FROM staged_operations WHERE expires_at<=? ORDER BY expires_at,id LIMIT ?)',now,limit),
       this.statement('DELETE FROM secrets WHERE id IN (SELECT id FROM secrets WHERE deleted_at<=? ORDER BY deleted_at,id LIMIT ?) RETURNING id', now - 7 * DAY, limit),
       this.statement('DELETE FROM audit_events WHERE id IN (SELECT id FROM audit_events WHERE created_at<=? ORDER BY created_at,id LIMIT ?) RETURNING id', now - 30 * DAY, limit)
-    ]); return {secrets: results[0]!.results.length, events: results[1]!.results.length};
+    ]); return {secrets: results[1]!.results.length, events: results[2]!.results.length};
   }
 }

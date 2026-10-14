@@ -52,8 +52,102 @@
     const init = { method, credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } };
     if (method !== 'GET') { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body ?? {}); }
     const response = await fetch(`/api${path}`, init);
-    if (!response.ok) throw new Error(errors[response.status] ?? '요청을 처리하지 못했습니다. 잠시 후 새로고침하세요.');
+    if (!response.ok) {
+      const error = new Error(errors[response.status] ?? '요청을 처리하지 못했습니다. 잠시 후 새로고침하세요.');
+      error.chunkRequired = response.status === 413 && response.headers.get('x-psm-chunk-required') === '1';
+      throw error;
+    }
     return response.json();
+  }
+  const backupTables = ['projects', 'environments', 'secrets', 'secret_versions', 'ci_policies', 'audit_events'];
+  const jsonBytes = (value) => new TextEncoder().encode(JSON.stringify(value)).length;
+  function splitRows(rows, limit, imports = false) {
+    const chunks = []; let chunk = [], valueBytes = 0;
+    for (const row of rows) {
+      const bytes = imports ? new TextEncoder().encode(row.value).length : 0;
+      if (chunk.length && (chunk.length >= limit || jsonBytes([...chunk, row]) > 90000 || valueBytes + bytes > 65536)) {
+        chunks.push(chunk); chunk = []; valueBytes = 0;
+      }
+      chunk.push(row); valueBytes += bytes;
+    }
+    if (chunk.length) chunks.push(chunk);
+    return chunks;
+  }
+  async function preparedOperation(input, groups, current) {
+    if (!current()) return false;
+    const operation = await api('/operations', 'POST', input);
+    let committed = false;
+    try {
+      let index = 0;
+      for (const [table, rows] of groups) {
+        if (!current()) return false;
+        message(`내용을 준비하는 중입니다. (${index + 1} / ${groups.length})`);
+        await api(`/operations/${encodeURIComponent(operation.id)}/chunks`, 'POST', { index: index++, table, rows });
+      }
+      if (!current()) return false;
+      await api(`/operations/${encodeURIComponent(operation.id)}/commit`, 'POST', {});
+      committed = true; return true;
+    } finally {
+      if (!committed) await api(`/operations/${encodeURIComponent(operation.id)}`, 'DELETE', {}).catch(() => {});
+    }
+  }
+  async function importEntries(environmentId, entries, current) {
+    const large = entries.length > 10 || jsonBytes(entries) > 90000 || entries.reduce((bytes, entry) => bytes + new TextEncoder().encode(entry.value).length, 0) > 65536;
+    try {
+      if (large) throw Object.assign(new Error(errors[413]), { chunkRequired: true });
+      await api('/imports/apply', 'POST', { environmentId, entries });
+    }
+    catch (error) {
+      if (!error.chunkRequired) throw error;
+      if (jsonBytes(entries) > 131072) throw new Error(errors[413]);
+      const groups = splitRows(entries, 10, true).map((rows) => ['imports', rows]);
+      if (!await preparedOperation({ kind: 'import', environmentId, counts: { imports: entries.length } }, groups, current)) return;
+    }
+    if (!current()) return;
+    closeDialog(); await loadView(); message('저장되었습니다.');
+  }
+  async function encryptedBackup(current) {
+    try { return await api('/backup'); }
+    catch (error) { if (!error.chunkRequired) throw error; }
+    if (!current()) return null;
+    const operation = await api('/operations', 'POST', { kind: 'export' });
+    try {
+      const backup = { schemaVersion: 1, createdAt: operation.createdAt, tables: {} };
+      for (const table of backupTables) {
+        const count = operation.counts?.[table];
+        if (!Number.isInteger(count) || count < 0 || count > 1000) throw new Error(errors[400]);
+        const rows = []; let index = 0;
+        do {
+          if (!current()) return null;
+          message('암호화 백업을 준비하는 중입니다.');
+          const page = await api(`/operations/${encodeURIComponent(operation.id)}/chunks?table=${table}&index=${index}`);
+          if (!Array.isArray(page.rows) || page.rows.length > 100) throw new Error(errors[400]);
+          rows.push(...page.rows);
+          if (page.nextIndex === null) break;
+          if (!Number.isInteger(page.nextIndex) || page.nextIndex <= index || page.nextIndex > count) throw new Error(errors[400]);
+          index = page.nextIndex;
+        } while (true);
+        if (rows.length !== count) throw new Error(errors[400]);
+        backup.tables[table] = rows;
+        if (jsonBytes(backup) > 1048576) throw new Error(errors[413]);
+      }
+      return backup;
+    } finally { await api(`/operations/${encodeURIComponent(operation.id)}`, 'DELETE', {}).catch(() => {}); }
+  }
+  async function restoreEncryptedBackup(backup, current) {
+    try {
+      if (jsonBytes(backup) > 90000 || (Array.isArray(backup.tables?.secret_versions) && backup.tables.secret_versions.length > 10)) throw Object.assign(new Error(errors[413]), { chunkRequired: true });
+      await api('/backup/restore', 'POST', backup); return true;
+    }
+    catch (error) { if (!error.chunkRequired) throw error; }
+    if (backup.schemaVersion !== 1 || !Number.isSafeInteger(backup.createdAt) || backup.createdAt < 0 || !backup.tables || Object.keys(backup).sort().join(',') !== 'createdAt,schemaVersion,tables' || Object.keys(backup.tables).sort().join(',') !== [...backupTables].sort().join(',') || jsonBytes(backup) > 1048576) throw new Error(errors[400]);
+    const counts = {}, groups = [];
+    for (const table of backupTables) {
+      if (!Array.isArray(backup.tables[table])) throw new Error(errors[400]);
+      counts[table] = backup.tables[table].length;
+      groups.push(...splitRows(backup.tables[table], table === 'secret_versions' ? 10 : 100).map((rows) => [table, rows]));
+    }
+    return preparedOperation({ kind: 'restore', counts, createdAt: backup.createdAt }, groups, current);
   }
   function contextScope() {
     const revision = state.revision;
@@ -346,7 +440,7 @@
         const current = scope();
         const selected = entries.filter((entry, index) => choices[index].checked && !entry.deleted).map((entry) => ({ name: entry.name, value: entry.value, ...(entry.exists ? { expectedVersionId: entry.expectedVersionId } : {}) }));
         if (!selected.length) { message('적용할 항목을 선택하세요.', true); return; }
-        await saved('/imports/apply', 'POST', { environmentId, entries: selected }, current);
+        await importEntries(environmentId, selected, current);
       });
       for (const entry of entries) {
         const checkbox = element('input', null, { type: 'checkbox', disabled: entry.deleted });
@@ -474,8 +568,8 @@
   function renderBackup() {
     view.append(group('panel', element('h2', '암호화 백업'), element('p', '프로젝트·환경·시크릿 버전·CI 정책을 JSON으로 다운로드합니다. 암호화 키는 포함되지 않습니다. 복구에 필요한 키를 별도로 안전하게 보관하세요.', { class: 'notice' }), button('암호화 백업 다운로드', async () => {
       const current = scope();
-      const backup = await api('/backup');
-      if (!current()) return;
+      const backup = await encryptedBackup(current);
+      if (!current() || !backup) return;
       download(JSON.stringify(backup), `psm-${new Date().toISOString().slice(0, 10)}.backup.json`, 'application/json');
       message('암호화 백업 다운로드를 시작했습니다.');
     }, 'primary')),
@@ -490,7 +584,7 @@
       let restore = backup;
       confirmAction('백업 복구 확인', '빈 데이터베이스에 업로드한 백업을 복구합니다. 복구된 CI 정책은 비활성화되며 암호화 키를 별도로 구성해야 합니다.', '복구 확인', async () => {
         const current = scope();
-        await api('/backup/restore', 'POST', restore);
+        if (!await restoreEncryptedBackup(restore, current)) return;
         if (!current()) return;
         navigate(); await refreshWorkspace();
         message('백업을 복구했습니다. 암호화 키와 비활성 CI 정책을 확인하세요.');

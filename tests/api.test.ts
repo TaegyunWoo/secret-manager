@@ -93,6 +93,19 @@ test('imports validate selected CAS entries and backup remains encrypted with gu
   try { const response = await admin.fetch(new Request('https://app.example/api/backup/restore',{method:'POST',headers:{'Cf-Access-Jwt-Assertion':await signed('admin'),'content-type':'application/json'},body:JSON.stringify(backup)}),{...env,DB:target.db});assert.deepEqual(await json(response),{ok:true});assert.ok((await new Store(target.db,JSON.parse(config.KEYRING_JSON),'current').listProjects()).length>0); }
   finally {await target.dispose();}
 });
+test('staged operation API requires owner auth and same origin, hides preparation and commits once',async()=>{
+  const {environment}=await fixture();
+  const response=await call('/api/operations','POST',{kind:'import',environmentId:environment.id,counts:{imports:1}});
+  const operation=await json(response,201);
+  await json(await call(`/api/operations/${operation.id}`,'GET',undefined,{},'admin','invalid'),401);
+  await json(await call(`/api/operations/${operation.id}/chunks`,'POST',{index:0,table:'imports',rows:[{name:'STAGED',value:'private-stage'}]},{origin:'https://bad.example'}),403);
+  await json(await call(`/api/operations/${operation.id}/chunks`,'POST',{index:0,table:'imports',rows:[{name:'STAGED',value:'private-stage'}]}));
+  assert(!(await store.listSecrets(environment.id)).some(secret=>secret.name==='STAGED'));
+  await json(await call(`/api/operations/${operation.id}/commit`,'POST',{}));
+  await json(await call(`/api/operations/${operation.id}/commit`,'POST',{}));
+  assert.equal((await store.resolveEnvironment(environment.id,['STAGED'])).secrets[0]?.value,'private-stage');
+  assert(!(await store.listAudit(500)).some(event=>JSON.stringify(event).includes('private-stage')));
+});
 test('CI requires signed GitHub identity and freshly authorizes requested environment before resolving',async () => {
   const {project,environment,secret} = await fixture();
   const policyInput = {environmentId:environment.id,repositoryId:'123',repositoryOwnerId:'456',branch:'refs/heads/main',workflow:'.github/workflows/deploy.yml',events:['push'],githubEnvironment:'production',active:true};

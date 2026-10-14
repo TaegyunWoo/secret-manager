@@ -16,6 +16,7 @@ async function setup(reply?: Reply) {
   const copied: string[] = [];
   Object.defineProperty(window.navigator, 'clipboard', { value: { writeText: async (value: string) => { copied.push(value); } } });
   window.TextDecoder = TextDecoder as any;
+  window.TextEncoder = TextEncoder as any;
   window.Blob = Blob as any;
   window.URL.createObjectURL = (blob: Blob) => { downloads.push(blob); return 'blob:fixture'; };
   window.URL.revokeObjectURL = () => {};
@@ -466,5 +467,58 @@ test('policy edit no-op avoids PATCH and an explicit checkbox change activates t
     assert.equal(h.requests.filter(r=>r.method==='PATCH').length,0);assert.equal((h.doc.querySelector('#dialog') as HTMLDialogElement).open,false);
     await h.click('정책 편집');(h.doc.querySelector('[name="active"]') as HTMLInputElement).checked=true;await h.submit();
     assert.deepEqual(h.requests.find(r=>r.method==='PATCH')!.body,{active:true});
+  }finally{h.dom.window.close();}
+});
+test('large import prepares bounded batches and commits only after every batch succeeds',async()=>{
+  const entries=Array.from({length:21},(_,i)=>({name:'KEY_'+i,value:'private-'+i,exists:false,deleted:false}));
+  const h=await setup(r=>{
+    if(r.path==='/api/imports/preview')return {entries};
+    if(r.path==='/api/imports/apply')return Response.json({error:{code:'chunk_required'}},{status:413,headers:{'x-psm-chunk-required':'1'}});
+    if(r.path==='/api/operations')return {id:'operation-1'};
+    return undefined;
+  });
+  try{
+    await h.click('.env 가져오기');h.input('source','placeholder');await h.submit();await h.submit();
+    const chunks=h.requests.filter(r=>r.path==='/api/operations/operation-1/chunks');
+    assert.deepEqual(chunks.map(r=>r.body.rows.length),[10,10,1]);
+    assert.deepEqual(chunks.map(r=>r.body.index),[0,1,2]);
+    assert(h.requests.some(r=>r.path==='/api/operations/operation-1/commit'));
+    assert(!h.requests.some(r=>r.path==='/api/imports/apply'));
+    assert(!h.doc.body.textContent?.includes('private-'));
+  }finally{h.dom.window.close();}
+});
+test('a failed import preparation cancels its operation without sending commit',async()=>{
+  const entries=Array.from({length:11},(_,i)=>({name:'KEY_'+i,value:'private-'+i,exists:false,deleted:false}));
+  const h=await setup(r=>{
+    if(r.path==='/api/imports/preview')return {entries};
+    if(r.path==='/api/imports/apply')return Response.json({}, {status:413,headers:{'x-psm-chunk-required':'1'}});
+    if(r.path==='/api/operations')return {id:'operation-1'};
+    if(r.path.endsWith('/chunks')&&r.body.index===1)return Response.json({private:'must-not-display'},{status:500});
+    return undefined;
+  });
+  try{
+    await h.click('.env 가져오기');h.input('source','placeholder');await h.submit();await h.submit();
+    assert(!h.requests.some(r=>r.path.endsWith('/commit')));
+    assert(h.requests.some(r=>r.path==='/api/operations/operation-1'&&r.method==='DELETE'));
+    assert(!h.doc.body.textContent?.includes('must-not-display'));
+  }finally{h.dom.window.close();}
+});
+test('large backup is paged from one snapshot and large restore stages instead of posting the full file',async()=>{
+  const tables={projects:[],environments:[],secrets:[],secret_versions:Array.from({length:11},(_,i)=>({id:'version-'+i,ciphertext:'encrypted-'+i})),ci_policies:[],audit_events:[]};
+  const backup={schemaVersion:1,createdAt:0,tables};
+  const h=await setup(r=>{
+    if(r.path==='/api/backup')return Response.json({}, {status:413,headers:{'x-psm-chunk-required':'1'}});
+    if(r.path==='/api/operations')return {id:r.body.kind==='export'?'export-1':'restore-1',createdAt:0,counts:Object.fromEntries(Object.entries(tables).map(([table,rows])=>[table,rows.length]))};
+    if(r.path.startsWith('/api/operations/export-1/chunks')){const url=new URL(r.path,'https://vault.example');const table=url.searchParams.get('table') as keyof typeof tables,index=Number(url.searchParams.get('index'));return {rows:tables[table].slice(index,index+10),nextIndex:index+10<tables[table].length?index+10:null};}
+    return undefined;
+  });
+  try{
+    await h.click('백업·복구');await h.click('암호화 백업 다운로드');assert.deepEqual(JSON.parse(await h.downloads[0]!.text()),backup);
+    assert(h.requests.some(r=>r.path==='/api/operations/export-1'&&r.method==='DELETE'));
+    await h.click('백업 복구');const file=h.doc.querySelector<HTMLInputElement>('[name=backup]')!;
+    Object.defineProperty(file,'files',{value:[{size:Buffer.byteLength(JSON.stringify(backup)),text:async()=>JSON.stringify(backup)}]});file.dispatchEvent(new h.window.Event('change'));await settle();await h.submit();await h.click('복구 확인');
+    assert(!h.requests.some(r=>r.path==='/api/backup/restore'));
+    assert.deepEqual(h.requests.filter(r=>r.path==='/api/operations/restore-1/chunks').map(r=>r.body.rows.length),[10,1]);
+    assert(h.requests.some(r=>r.path==='/api/operations/restore-1/commit'));
   }finally{h.dom.window.close();}
 });

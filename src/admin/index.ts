@@ -4,6 +4,7 @@ import { exportBackup, restoreBackup } from '../shared/backup.js';
 import { previewImport, applyImport } from '../shared/imports.js';
 import { assertSameOrigin, readJson, jsonResponse, errorResponse, securityHeaders } from '../shared/http.js';
 import { AppError } from '../shared/errors.js';
+import { Operations, type OperationInput } from '../shared/operations.js';
 import { Store, validId, invalid } from '../shared/store.js';
 import { configuredStore, objectInput, resolveInput, auditFailure, type StorageEnv } from '../shared/worker.js';
 import type { SecretInput, SecretUpdate, ImportEntry } from '../shared/types.js';
@@ -11,7 +12,7 @@ import type { SecretInput, SecretUpdate, ImportEntry } from '../shared/types.js'
 export interface AdminEnv extends StorageEnv, AccessConfig { ASSETS: Pick<Fetcher, 'fetch'> }
 interface Route {
   method: string; pattern: RegExp; action: string; fields?: string[];
-  run(store: Store, match: RegExpMatchArray, body: unknown, url: URL, target: (id: string) => void): Promise<unknown>;
+  run(store: Store, match: RegExpMatchArray, body: unknown, url: URL, target: (id: string) => void, actor: string): Promise<unknown>;
   status?: number;
 }
 function body<T>(value: unknown): T { return value as T; }
@@ -19,6 +20,12 @@ const expected = (value: unknown) => body<{expectedVersionId:string}>(value).exp
 const filter = (url: URL, name: string) => url.searchParams.get(name) ?? undefined;
 const policyFields = ['environmentId','repositoryId','repositoryOwnerId','branch','workflow','events','githubEnvironment','active'];
 const routes: Route[] = [
+  {method:'POST',pattern:/^\/api\/operations$/,action:'operations.create',fields:['kind','environmentId','counts','createdAt'],status:201,run:async(s,_m,b,_u,_target,actor)=>new Operations(s,actor).begin(body<OperationInput>(b))},
+  {method:'GET',pattern:/^\/api\/operations\/([^/]+)$/,action:'operations.status',run:async(s,m,_b,_u,_target,actor)=>new Operations(s,actor).get(m[1]!)},
+  {method:'POST',pattern:/^\/api\/operations\/([^/]+)\/chunks$/,action:'operations.prepare',fields:['index','table','rows'],run:async(s,m,b,_u,_target,actor)=>{const input=body<{index:number;table:string;rows:unknown}>(b);return new Operations(s,actor).upload(m[1]!,input.index,input.table,input.rows);}},
+  {method:'GET',pattern:/^\/api\/operations\/([^/]+)\/chunks$/,action:'backup.page',run:async(s,m,_b,u,_target,actor)=>new Operations(s,actor).page(m[1]!,u.searchParams.get('table')??'',Number(u.searchParams.get('index')??0))},
+  {method:'POST',pattern:/^\/api\/operations\/([^/]+)\/commit$/,action:'operations.commit',fields:[],run:async(s,m,_b,_u,_target,actor)=>new Operations(s,actor).commit(m[1]!)},
+  {method:'DELETE',pattern:/^\/api\/operations\/([^/]+)$/,action:'operations.cancel',fields:[],run:async(s,m,_b,_u,_target,actor)=>new Operations(s,actor).cancel(m[1]!)},
   {method:'GET',pattern:/^\/api\/projects$/,action:'projects.list',run:async s=>({projects:await s.listProjects()})},
   {method:'POST',pattern:/^\/api\/projects$/,action:'projects.create',fields:['name','slug'],status:201,run:async(s,_m,b)=>s.createProject(body(b))},
   {method:'PATCH',pattern:/^\/api\/projects\/([^/]+)$/,action:'projects.update',fields:['name','slug'],run:async(s,m,b)=>s.updateProject(m[1]!,body(b))},
@@ -76,10 +83,14 @@ export function createAdminHandler(jwks?: JWTVerifyGetKey) {
         targetId=match[1]??null;
         let input:unknown;
         if(!['GET','HEAD'].includes(request.method)) {
-          assertSameOrigin(request);input=await readJson(request);
+          assertSameOrigin(request);
+          const budget=url.pathname==='/api/backup/restore'?90000:url.pathname.includes('/operations/')?140000:1048576;
+          if(budget===90000&&Number(request.headers.get('content-length'))>budget)throw new AppError(413,'chunk_required');
+          try { input=await readJson(request,budget); }
+          catch(error){if(budget===90000&&error instanceof AppError&&error.code==='payload_too_large')throw new AppError(413,'chunk_required');throw error;}
           if(route.fields)input=objectInput(input,route.fields);
         }
-        const result=await route.run(configuredStore(env),match,input,url,id=>{validId(id);targetId=id;});
+        const result=await route.run(configuredStore(env),match,input,url,id=>{validId(id);targetId=id;},actor);
         if(targetId===null && result && typeof result==='object' && 'id' in result){validId(result.id);targetId=result.id;}
         await auditStore.audit({actor,action,targetId,result:'success'});
         return jsonResponse(result,route.status);

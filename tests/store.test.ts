@@ -4,6 +4,7 @@ import { database } from './helpers/d1.js';
 import { Store } from '../src/shared/store.js';
 import { parseDotenv, previewImport, applyImport } from '../src/shared/imports.js';
 import { exportBackup, restoreBackup } from '../src/shared/backup.js';
+import {Operations} from '../src/shared/operations.js';
 const keys = { main: Buffer.alloc(32, 41).toString('base64') };
 const day = 86400000;
 async function setup(t: { after: (fn: () => Promise<void>) => void }) {
@@ -85,7 +86,12 @@ test('dotenv parses literal multiline/export/comments and atomically rejects sta
   const current = (await store.listSecrets(environment.id))[0]!;
   await applyImport(store, environment.id, [{ name: 'A', value: 'new', expectedVersionId: current.currentVersionId }, { name: 'B', value: '' }]);
   assert.deepEqual((await store.resolve('example', 'dev', ['A', 'B'])).secrets.map(x => x.value), ['new', '']);
-  await applyImport(store, environment.id, Array.from({length: 100}, (_, i) => ({ name: `KEY_${i}`, value: '' })));
+  const entries=Array.from({length:100},(_,i)=>({name:`KEY_${i}`,value:''}));
+  await assert.rejects(applyImport(store,environment.id,entries),{code:'chunk_required'});
+  const operations=new Operations(store,'owner@example.test'),operation=await operations.begin({kind:'import',environmentId:environment.id,counts:{imports:100}});
+  for(let index=0;index<10;index++)await operations.upload(operation.id,index,'imports',entries.slice(index*10,index*10+10));
+  assert.equal((await store.listSecrets(environment.id)).length,2);
+  await operations.commit(operation.id);assert.equal((await store.listSecrets(environment.id)).length,102);
 });
 test('backup roundtrip verifies ciphertext and relationships, rejects nonempty DB, disables restored policies', async t => {
   const { store, environment } = await setup(t);
@@ -108,6 +114,22 @@ test('backup roundtrip verifies ciphertext and relationships, rejects nonempty D
   assert.equal((await restored.listPolicies())[0]?.active, false);
   const oversize = structuredClone(backup); oversize.tables.secret_versions[0]!.ciphertext = 'x'.repeat(1048577);
   await assert.rejects(restoreBackup(new Store(target.db, keys, 'main'), oversize), { code: 'backup_too_large' });
+});
+test('resolve rejects byte growth between preflight and fetch instead of decrypting an oversized batch',async t=>{
+  const {store,environment}=await setup(t);
+  const a=await store.createSecret({environmentId:environment.id,name:'A',kind:'file',value:'small'}),b=await store.createSecret({environmentId:environment.id,name:'B',kind:'file',value:'small'});
+  const original=store.rows.bind(store);let mutated=false;
+  store.rows=async function<T>(sql:string,...params:unknown[]):Promise<T[]>{
+    const result=await original<T>(sql,...params);
+    if(!mutated&&sql.startsWith('SELECT length(v.ciphertext)')){mutated=true;for(const secret of [a,b])await store.updateSecret(secret.id,{expectedVersionId:secret.currentVersionId,value:'x'.repeat(65536)});}
+    return result;
+  };
+  await assert.rejects(store.resolveEnvironment(environment.id,['A','B']),{code:'chunk_required'});assert(mutated);
+});
+test('legacy backup counts escaped JSON bytes and requires chunks above its small-request budget',async t=>{
+  const {store}=await setup(t);
+  for(let i=0;i<300;i++)await store.createProject({name:'"'.repeat(128),slug:'quoted-'+i});
+  await assert.rejects(exportBackup(store),{code:'chunk_required'});
 });
 test('concurrent bulk imports roll back every losing insert after passing the same preview', async t => {
   const {store, db, environment} = await setup(t);

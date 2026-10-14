@@ -19,7 +19,10 @@ async function fixture() {
   const server = createServer(async (req, res) => {
     let body = ''; for await (const part of req) body += part;
     requests.push({ url: req.url!, body: body ? JSON.parse(body) : null, token: req.headers['cf-access-token'] as string });
-    res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(typeof response === 'function' ? response(req) : response));
+    const selected = typeof response === 'function' ? response(req,body ? JSON.parse(body) : null) : response;
+    const override = selected && typeof selected === 'object' && '__status' in selected ? selected as {__status:number;body:unknown} : null;
+    const chunkRequired=override?.__status===413&&(override.body as {error?:{code?:string}})?.error?.code==='chunk_required';
+    res.writeHead(override?.__status ?? status, { 'content-type': 'application/json',...(chunkRequired?{'x-psm-chunk-required':'1'}:{}) }); res.end(JSON.stringify(override ? override.body : selected));
   });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -187,9 +190,9 @@ test('CI uses trusted runner URL, exact origin audience and bearer token without
 
 test('resolve accepts full bounded batches larger than request body limit', async()=>{
   const f=await fixture();try {
-    const config=JSON.parse(await fs.readFile(f.config,'utf8'));config.secrets={};const values=[];
-    for(let i=0;i<20;i++){config.secrets[`FILE_${i}`]={name:`KEY_${i}`,kind:'file'};values.push({name:`KEY_${i}`,kind:'file',value:'x'.repeat(65536)});}await fs.writeFile(f.config,JSON.stringify(config));f.setResponse({secrets:values});
-    const observed=join(f.dir,'length');const out=await f.run(`require('fs').writeFileSync(${JSON.stringify(observed)},String(require('fs').statSync(process.env.FILE_19).size))`).result;assert.equal(out.code,0);assert.equal(await fs.readFile(observed,'utf8'),'65536');assert.deepEqual(await fs.readdir(f.root),[]);
+    const config=JSON.parse(await fs.readFile(f.config,'utf8'));config.secrets={};const values:{name:string;kind:string;value:string}[]=[];
+    for(let i=0;i<20;i++){config.secrets[`FILE_${i}`]={name:`KEY_${i}`,kind:'file'};values.push({name:`KEY_${i}`,kind:'file',value:'x'.repeat(65536)});}await fs.writeFile(f.config,JSON.stringify(config));f.setResponse((_req:unknown,body:{names:string[]})=>({secrets:values.filter(v=>body.names.includes(v.name))}));
+    const observed=join(f.dir,'length');const out=await f.run(`require('fs').writeFileSync(${JSON.stringify(observed)},String(require('fs').statSync(process.env.FILE_19).size))`).result;assert.equal(out.code,0);assert.equal(await fs.readFile(observed,'utf8'),'65536');assert.deepEqual(await fs.readdir(f.root),[]);assert(f.requests.every(r=>(r.body as {names:string[]}).names.length<=10));assert.equal(f.requests.length,2);
   }finally{await f.close();}
 });
 
@@ -198,6 +201,19 @@ test('HTTP reader rejects streamed overflow, invalid JSON and redirects', async(
   let mode='overflow';const server=createServer((req,res)=>{if(mode==='redirect'){res.writeHead(302,{location:'/credential-leak'});res.end();}else{res.writeHead(200,{'content-type':'application/json'});res.write(mode==='overflow'?'x'.repeat(80):'{bad');res.end();}});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const url=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
   try {for(mode of ['overflow','invalid','redirect'])await assert.rejects(requestJson(url,{},64),/request_failed/);}finally{await new Promise<void>(done=>server.close(()=>done()));}
+});
+test('CLI bisects only explicit chunk requests and never starts after a later batch fails',async()=>{
+  const f=await fixture();try{
+    const values=[{name:'TOKEN',kind:'env',value:secret},{name:'KEY',kind:'file',value:fileValue}];
+    f.setResponse((_req:unknown,body:{names:string[]})=>body.names.length>1?{__status:413,body:{error:{code:'chunk_required'}}}:{secrets:values.filter(value=>body.names.includes(value.name))});
+    assert.equal((await f.run('process.exit(0)').result).code,0);assert.deepEqual(f.requests.map(request=>(request.body as {names:string[]}).names),[['TOKEN','KEY'],['TOKEN'],['KEY']]);
+    const marker=join(f.dir,'must-not-start');
+    f.setResponse((_req:unknown,body:{names:string[]})=>body.names.length>1?{__status:413,body:{error:{code:'chunk_required'}}}:body.names[0]==='KEY'?{__status:503,body:{error:{code:secret}}}:{secrets:[values[0]]});
+    const out=await f.run(`require('fs').writeFileSync(${JSON.stringify(marker)},'started')`).result;
+    assert.equal(out.code,1);assert.equal(out.stdout,'');assert.doesNotMatch(out.stderr,/synthetic/);await assert.rejects(fs.stat(marker));assert.deepEqual(await fs.readdir(f.root),[]);
+    f.setResponse({error:{code:'different-error'}},413);f.requests.length=0;
+    assert.equal((await f.run('process.exit(0)').result).code,1);assert.equal(f.requests.length,1);
+  }finally{await f.close();}
 });
 
 

@@ -50,7 +50,9 @@ export function jsonResponse(body: unknown, status = 200): Response {
 
 export function errorResponse(error: unknown): Response {
   if (error instanceof AppError && error.status >= 400 && error.status <= 599 && /^[a-z_]+$/.test(error.code)) {
-    return jsonResponse({error:{code:error.code}}, error.status);
+    const response = jsonResponse({error:{code:error.code}}, error.status);
+    if (error.code === 'chunk_required') response.headers.set('x-psm-chunk-required', '1');
+    return response;
   }
   return jsonResponse({error:{code:'internal_error'}}, 500);
 }

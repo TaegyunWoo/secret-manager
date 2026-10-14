@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { fail, object, strictJson, type Config } from './config.js';
 import type { ResolvedSecret } from '../shared/types.js';
+import { AppError } from '../shared/errors.js';
 
 export function cloudflared(args: string[]): Promise<string> {
   return new Promise((resolve,reject) => execFile('cloudflared',args,{timeout:120000,maxBuffer:65536,encoding:'utf8'},(error,stdout) => error ? reject(new Error('access_failed')) : resolve(stdout.trim())));
@@ -11,13 +12,17 @@ export async function login(config: Config): Promise<void> { await cloudflared([
 export async function requestJson(url: string, options: RequestInit, maxBytes = 40 * 1024 * 1024): Promise<unknown> {
   try {
     const response = await fetch(url,{...options,redirect:'error',signal:AbortSignal.timeout(30000)});
-    if (!response.ok) { await response.body?.cancel(); fail('request_failed'); }
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 413 && response.headers.get('x-psm-chunk-required') === '1') throw new AppError(413, 'chunk_required');
+      fail('request_failed');
+    }
     const length = response.headers.get('content-length'); if (length && Number(length) > maxBytes) { await response.body?.cancel(); fail('response_too_large'); }
     const reader = response.body?.getReader(); if (!reader) fail('invalid_response');
     const chunks: Uint8Array[] = []; let size = 0;
     for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > maxBytes) { await reader.cancel(); fail('response_too_large'); } chunks.push(next.value); }
     return strictJson(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)));
-  } catch { fail('request_failed'); }
+  } catch (error) { if (error instanceof AppError && error.code === 'chunk_required') throw error; fail('request_failed'); }
 }
 export async function githubToken(ciUrl: string): Promise<string> {
   const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL, credential = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
@@ -44,5 +49,17 @@ export async function resolveSecrets(config: Config, project: string, environmen
   if (!token || /[\r\n\0]/.test(token)) fail('access_failed');
   const url = ci ? `${config.ciUrl}/v1/resolve` : `${config.adminUrl}/api/resolve`;
   const headers: Record<string,string> = {'content-type':'application/json'}; headers[ci ? 'Authorization' : 'cf-access-token'] = ci ? `Bearer ${token}` : token;
-  return validateResolved(await requestJson(url,{method:'POST',headers,body:JSON.stringify({project,environment,names:[...new Set(Object.values(config.secrets).map(item => item.name))]})}),config);
+  const names = [...new Set(Object.values(config.secrets).map(item => item.name))];
+  async function chunk(selected: string[]): Promise<ResolvedSecret[]> {
+    const subset = {...config,secrets:Object.fromEntries(Object.entries(config.secrets).filter(([,item]) => selected.includes(item.name)))};
+    try { return validateResolved(await requestJson(url,{method:'POST',headers,body:JSON.stringify({project,environment,names:selected})}),subset); }
+    catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'chunk_required' || selected.length === 1) fail('request_failed');
+      const middle = Math.ceil(selected.length / 2);
+      return [...await chunk(selected.slice(0,middle)),...await chunk(selected.slice(middle))];
+    }
+  }
+  const secrets: ResolvedSecret[] = [];
+  for (let index = 0; index < names.length; index += 10) secrets.push(...await chunk(names.slice(index,index + 10)));
+  return validateResolved({secrets},config);
 }

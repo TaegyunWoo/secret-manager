@@ -1,5 +1,6 @@
 import { Store, invalid, validName, validValue, MAX_IMPORT_BYTES } from './store.js';
 import type { ImportEntry, Secret } from './types.js';
+import { AppError } from './errors.js';
 export function parseDotenv(source: string): {name: string; value: string}[] {
   if (typeof source !== 'string' || new TextEncoder().encode(source).length > MAX_IMPORT_BYTES) invalid();
   const entries: {name: string; value: string}[] = []; const names = new Set<string>(); let offset = 0;
@@ -41,4 +42,7 @@ export async function previewImport(store: Store, environmentId: string, source:
   const byName = new Map(existing.map(s => [s.name, s]));
   return {entries: entries.map(entry => { const old = byName.get(entry.name); return {...entry, exists: !!old, deleted: old ? old.deletedAt !== null : false, ...(old ? {expectedVersionId: old.currentVersionId} : {})}; })};
 }
-export function applyImport(store: Store, environmentId: string, entries: ImportEntry[]): Promise<Secret[]> { return store.importEntries(environmentId, entries); }
+export async function applyImport(store: Store, environmentId: string, entries: ImportEntry[]): Promise<Secret[]> {
+  if(entries.length>10||entries.reduce((bytes,entry)=>bytes+(typeof entry.value==='string'?new TextEncoder().encode(entry.value).length:0),0)>65536)throw new AppError(413,'chunk_required');
+  return store.importEntries(environmentId, entries);
+}

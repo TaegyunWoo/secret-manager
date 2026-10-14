@@ -4,7 +4,7 @@ import { Store, validId, validText, validName, validKind, validPolicy, validValu
 import type { CiPolicy } from './auth.js';
 export const MAX_BACKUP_BYTES = 1048576;
 export const MAX_BACKUP_ROWS = 1000;
-const columns = {
+export const backupColumns = {
   projects: ['id','name','slug'],
   environments: ['id','project_id','name'],
   secrets: ['id','environment_id','name','kind','current_version_id','deleted_at','created_at','updated_at'],
@@ -12,6 +12,7 @@ const columns = {
   ci_policies: ['id','environment_id','repository_id','repository_owner_id','branch','workflow','events','github_environment','active'],
   audit_events: ['id','actor','action','target_id','result','created_at']
 } as const;
+const columns = backupColumns;
 type Table = keyof typeof columns;
 export type BackupRow = Record<string, string | number | null>;
 export interface Backup { schemaVersion: 1; createdAt: number; tables: Record<Table, BackupRow[]> }
@@ -21,19 +22,27 @@ function bad(): never { throw new AppError(400, 'invalid_backup'); }
 function size(value: unknown): void { if (new TextEncoder().encode(JSON.stringify(value)).length > MAX_BACKUP_BYTES) tooLarge(); }
 function timestamp(value: unknown): asserts value is number { if (!Number.isSafeInteger(value) || (value as number) < 0) bad(); }
 export async function exportBackup(store: Store): Promise<Backup> {
-  const statements: D1PreparedStatement[] = [];
-  for (const table of tables) {
-    const bytes = columns[table].map(c => `coalesce(length(CAST(${c} AS BLOB)),4)+${c.length + 8}`).join('+');
-    const stats = `SELECT count(*) AS count,coalesce(sum(${bytes}),0) AS bytes FROM ${table}`;
-    statements.push(store.statement(stats));
-    statements.push(store.statement(`SELECT * FROM ${table} WHERE (SELECT bytes FROM (${stats}))<=? ORDER BY id LIMIT ?`, MAX_BACKUP_BYTES, MAX_BACKUP_ROWS + 1));
-  }
-  let results: D1Result[]; try { results = await store.db.batch(statements); } catch { throw new AppError(500, 'storage_error'); }
   const output: Backup = {schemaVersion: 1, createdAt: Date.now(), tables: {} as Backup['tables']};
+  const emptyBytes=new TextEncoder().encode(JSON.stringify({...output,tables:Object.fromEntries(tables.map(table=>[table,[]]))})).length;
+  const statsParts=tables.map(table=>{
+    const row=`json_object(${columns[table].flatMap(column=>[`'${column}'`,column]).join(',')})`;
+    return `SELECT '${table}' AS name,count(*) AS count,coalesce(sum(length(CAST(${row} AS BLOB))),0) AS bytes FROM ${table}`;
+  });
+  // D1 limits compound SELECT terms, including the six backup tables.
+  const statsSql=`SELECT * FROM (${statsParts.slice(0,3).join(' UNION ALL ')}) UNION ALL SELECT * FROM (${statsParts.slice(3).join(' UNION ALL ')})`;
+  type Stats={name:Table;count:number;bytes:number};
+  const check=(stats:Stats[])=>{
+    const bytes=emptyBytes+stats.reduce((sum,row)=>sum+row.bytes+Math.max(0,row.count-1),0);
+    if(stats.some(row=>row.count>MAX_BACKUP_ROWS)||bytes>MAX_BACKUP_BYTES)tooLarge();
+    if(bytes>90000)throw new AppError(413,'chunk_required');
+  };
+  check(await store.rows<Stats>(statsSql));
+  const statements=[store.statement(statsSql),...tables.map(table=>store.statement(`SELECT * FROM ${table} WHERE ?+(SELECT sum(bytes+max(0,count-1)) FROM (${statsSql}))<=90000 ORDER BY id LIMIT ?`,emptyBytes,MAX_BACKUP_ROWS+1))];
+  const results=await store.batch(statements);
+  const actual=results[0]!.results as Stats[];check(actual);
   tables.forEach((table, index) => {
-    const stats = results[index * 2]!.results[0] as {count: number; bytes: number};
-    if (stats.count > MAX_BACKUP_ROWS || stats.bytes > MAX_BACKUP_BYTES) tooLarge();
-    output.tables[table] = results[index * 2 + 1]!.results as BackupRow[];
+    output.tables[table] = results[index+1]!.results as BackupRow[];
+    if(output.tables[table].length!==actual[index]!.count)throw new AppError(500,'storage_error');
   }); size(output); return output;
 }
 async function validate(store: Store, value: unknown): Promise<Backup> {
@@ -83,7 +92,10 @@ async function validate(store: Store, value: unknown): Promise<Backup> {
   } catch { bad(); }
 }
 export async function restoreBackup(store: Store, value: unknown): Promise<void> {
-  size(value); const backup = await validate(store, value);
+  size(value);
+  const candidate=value as Partial<Backup>|null;
+  if(new TextEncoder().encode(JSON.stringify(value)).length>90000||(Array.isArray(candidate?.tables?.secret_versions)&&candidate.tables.secret_versions.length>10))throw new AppError(413,'chunk_required');
+  const backup = await validate(store, value);
   const sentinel = crypto.randomUUID();
   // The sentinel forces SQL failure even for an empty backup. Audit-only DBs are valid targets.
   const occupied = tables.filter(t => t !== 'audit_events').map(t => `EXISTS(SELECT 1 FROM ${t})`).join(' OR ');
