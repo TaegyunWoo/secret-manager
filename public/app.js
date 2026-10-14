@@ -7,6 +7,7 @@
   const state = { projects: [], environments: [], projectId: '', environmentId: '', view: 'secrets', revision: 0 };
   let dialogRevision = 0;
   let loadRevision = 0;
+  let workspaceRevision = 0;
   let releaseDialog = () => {};
   const views = {
     secrets: ['시크릿', '프로젝트에서 사용할 환경변수와 파일을 관리하세요.'],
@@ -57,6 +58,10 @@
   function contextScope() {
     const revision = state.revision;
     return () => revision === state.revision;
+  }
+  function workspaceScope() {
+    const revision = workspaceRevision;
+    return () => revision === workspaceRevision;
   }
   function scope() {
     const current = contextScope();
@@ -139,7 +144,8 @@
   }
   function empty(text) { return group('empty-state', element('p', text)); }
   async function refreshWorkspace() {
-    const current = contextScope();
+    workspaceRevision++;
+    const current = workspaceScope();
     const { projects } = await api('/projects');
     if (!current()) return;
     state.projects = projects;
@@ -148,9 +154,10 @@
     await refreshEnvironments();
   }
   async function refreshEnvironments() {
-    const current = contextScope();
-    const environments = state.projectId ? (await api(`/environments?projectId=${encodeURIComponent(state.projectId)}`)).environments : [];
-    if (!current()) return;
+    const current = workspaceScope();
+    const projectId = state.projectId;
+    const environments = projectId ? (await api(`/environments?projectId=${encodeURIComponent(projectId)}`)).environments : [];
+    if (!current() || projectId !== state.projectId) return;
     state.environments = environments;
     state.environmentId = environments.some((e) => e.id === state.environmentId) ? state.environmentId : environments[0]?.id ?? '';
     selectOptions($('#environment-select'), environments, state.environmentId, '환경 없음');
@@ -245,7 +252,9 @@
     const environmentId = state.environmentId;
     let rawValue = null;
     let fileRevision = 0;
+    let valueReady = true;
     const f = form(content, '저장', async () => {
+      if ((!secret || replace.checked) && !valueReady) { message('새 파일을 선택하거나 원문을 직접 입력하세요.', true); return; }
       const current = scope();
       const body = { name: name.value, kind: kind.value };
       if (!secret || replace.checked) body.value = rawValue ?? value.value;
@@ -266,40 +275,56 @@
     const valueGroup = group('stack');
     f.node.append(valueGroup);
     const value = field(valueGroup, '원문', 'value', 'textarea', '', { spellcheck: false, autocomplete: 'off' });
-    value.addEventListener('input', () => { rawValue = null; fileRevision++; f.submit.disabled = false; });
+    value.addEventListener('input', () => { rawValue = null; fileRevision++; valueReady = true; f.submit.disabled = false; });
     const file = field(valueGroup, '텍스트 파일 업로드', 'file', 'file');
     const fileInfo = element('p', '업로드한 UTF-8 파일은 줄바꿈과 BOM을 그대로 저장합니다.', { class: 'help' });
     valueGroup.append(fileInfo);
+    function beginValueRead() {
+      rawValue = null; value.value = ''; valueReady = false; f.submit.disabled = true;
+      return ++fileRevision;
+    }
     file.addEventListener('change', () => run(file, async () => {
-      const uploaded = file.files?.[0];
-      if (!uploaded) return;
-      if (uploaded.size > 65536) { message('파일이나 입력 내용이 너무 큽니다.', true); return; }
       const current = scope();
-      const revision = ++fileRevision;
-      f.submit.disabled = true;
+      const revision = beginValueRead();
+      const uploaded = file.files?.[0];
+      if (!uploaded) { fileInfo.textContent = '파일을 선택하거나 원문을 직접 입력하세요.'; return; }
+      if (uploaded.size > 65536) {
+        fileInfo.textContent = '64 KiB 이하의 파일을 선택하거나 원문을 직접 입력하세요.';
+        message('파일이나 입력 내용이 너무 큽니다.', true); return;
+      }
+      fileInfo.textContent = '파일을 읽는 중입니다.';
       try {
         const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await uploaded.arrayBuffer());
         if (!current() || revision !== fileRevision) return;
-        rawValue = decoded; value.value = decoded; kind.value = 'file';
+        rawValue = decoded; value.value = decoded; kind.value = 'file'; valueReady = true;
         fileInfo.textContent = '파일을 읽었습니다. 원문을 수정하지 않으면 원래 줄바꿈과 BOM이 유지됩니다.';
-      } finally { if (current() && revision === fileRevision) f.submit.disabled = false; }
+      } catch {
+        if (current() && revision === fileRevision) {
+          fileInfo.textContent = '파일 읽기에 실패했습니다. 새 UTF-8 파일을 선택하거나 원문을 직접 입력하세요.';
+          message('파일을 읽지 못했습니다. UTF-8 형식과 파일 상태를 확인하세요.', true);
+        }
+      } finally { if (current() && revision === fileRevision) f.submit.disabled = !valueReady; }
     }));
     if (secret) valueGroup.prepend(button('현재 값 불러오기', async () => {
       const current = scope();
-      const revision = ++fileRevision;
-      f.submit.disabled = true;
+      const revision = beginValueRead();
+      fileInfo.textContent = '현재 원문을 불러오는 중입니다.';
       try {
         const revealed = await api(`/secrets/${encodeURIComponent(secret.id)}/reveal`, 'POST', {});
         if (!current() || revision !== fileRevision) return;
-        rawValue = revealed.value; value.value = revealed.value;
-      } finally { if (current() && revision === fileRevision) f.submit.disabled = false; }
+        rawValue = revealed.value; value.value = revealed.value; valueReady = true;
+        fileInfo.textContent = '현재 원문을 불러왔습니다. 수정하지 않으면 원래 줄바꿈과 BOM이 유지됩니다.';
+      } catch (error) {
+        if (current() && revision === fileRevision) fileInfo.textContent = '원문을 불러오지 못했습니다. 다시 요청하거나 원문을 직접 입력하세요.';
+        throw error;
+      } finally { if (current() && revision === fileRevision) f.submit.disabled = !valueReady; }
     }));
     replace.addEventListener('change', () => {
       valueGroup.hidden = !replace.checked;
-      if (!replace.checked) { rawValue = null; value.value = ''; file.value = ''; fileRevision++; f.submit.disabled = false; }
+      if (!replace.checked) { rawValue = null; value.value = ''; file.value = ''; fileRevision++; valueReady = true; f.submit.disabled = false; }
     });
     valueGroup.hidden = !replace.checked;
-    releaseDialog = () => { rawValue = null; value.value = ''; fileRevision++; };
+    releaseDialog = () => { rawValue = null; value.value = ''; valueReady = false; fileRevision++; };
     f.finish();
   }
   function importForm() {
@@ -487,6 +512,7 @@
   }
   $('#manage-workspace').addEventListener('click', () => run($('#manage-workspace'), manageWorkspace));
   $('#project-select').addEventListener('change', () => {
+    workspaceRevision++;
     navigate(); state.projectId = $('#project-select').value; state.environmentId = '';
     $('#environment-select').disabled = true;
     run($('#project-select'), refreshEnvironments);
