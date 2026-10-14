@@ -55,8 +55,10 @@ export async function encrypt(value: string, context: CryptoContext, keyring: Ke
   const key = await importKey(keyring, activeKeyId);
   try {
     if (typeof value !== 'string') throw new Error('invalid_value');
+    const plaintext = encoder.encode(value);
+    if (decoder.decode(plaintext) !== value) throw new Error('invalid_unicode');
     const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce, additionalData, tagLength: 128 }, key, encoder.encode(value));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce, additionalData, tagLength: 128 }, key, plaintext);
     return { ciphertext: encode(new Uint8Array(ciphertext)), nonce: encode(nonce), keyId: activeKeyId };
   } catch {
     throw new AppError(500, 'encryption_failed');

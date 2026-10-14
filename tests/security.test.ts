@@ -52,6 +52,13 @@ test('AES-GCM preserves leading BOM in PEM and environment values exactly', asyn
     assert.equal(await decrypt(encrypted, context, keyring), original);
   }
 });
+test('AES-GCM rejects lone surrogates instead of storing replacement characters', async () => {
+  for (const malformed of ['\uD800', '\uDFFF', 'prefix\uD800suffix']) {
+    await assert.rejects(encrypt(malformed, context, keyring, 'current'), error(500, 'encryption_failed'));
+  }
+  const valid = 'supplementary character: 😀';
+  assert.equal(await decrypt(await encrypt(valid, context, keyring, 'current'), context, keyring), valid);
+});
 test('every encryption uses a fresh nonce', async () => {
   const records = await Promise.all(Array.from({ length: 64 }, () => encrypt('same value', context, keyring, 'current')));
   assert.equal(new Set(records.map(record => record.nonce)).size, 64);
