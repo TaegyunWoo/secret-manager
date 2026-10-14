@@ -68,12 +68,14 @@ a { color: var(--primary); }
 .panel, .empty-state { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 24px; margin-bottom: 20px; }
 .empty-state { text-align: center; padding: 50px 24px; }
 .empty-state p { color: var(--muted); }
-.table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
+.table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+table { width: 100%; min-width: 760px; border-collapse: collapse; text-align: left; font-size: 14px; }
 caption { text-align: left; padding: 16px; font-weight: 600; }
 th { font-size: 12px; font-weight: 600; color: var(--muted); background: #f8fafc; white-space: nowrap; }
 th, td { padding: 14px 17px; border-bottom: 1px solid #e7edf3; vertical-align: middle; }
 td { overflow-wrap: anywhere; }
+th:first-child, td:first-child { min-width: 180px; white-space: nowrap; }
+th:nth-child(3), td:nth-child(3) { min-width: 150px; white-space: nowrap; }
 tbody tr:last-child td { border-bottom: 0; }
 td .actions { flex-wrap: nowrap; }
 td button { padding: 7px 10px; font-size: 13px; white-space: nowrap; }

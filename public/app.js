@@ -446,7 +446,7 @@
       const current = scope();
       const backup = await api('/backup');
       if (!current()) return;
-      download(JSON.stringify(backup, null, 2), `psm-${new Date().toISOString().slice(0, 10)}.backup.json`, 'application/json');
+      download(JSON.stringify(backup), `psm-${new Date().toISOString().slice(0, 10)}.backup.json`, 'application/json');
       message('암호화 백업 다운로드를 시작했습니다.');
     }, 'primary')),
     group('panel', element('h2', '빈 데이터베이스에 복구'), element('p', '프로젝트·환경·시크릿·CI 정책이 없는 데이터베이스에만 복구할 수 있습니다. 감사 기록은 유지되고 복구된 CI 정책은 비활성화됩니다. 파일은 최대 1 MiB입니다.', { class: 'notice' }), button('백업 복구', backupForm)));

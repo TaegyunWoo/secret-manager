@@ -247,6 +247,8 @@ test('audit renders hostile metadata safely; encrypted backup downloads and boun
     assert.equal(h.doc.querySelector('#view script'), null);
     await h.click('백업·복구'); await h.click('암호화 백업 다운로드');
     assert.deepEqual(JSON.parse(await h.downloads[0]!.text()), backup);
+    const compact = '{"schemaVersion":1,"exportedAt":0,"tables":{"projects":[],"environments":[],"secrets":[],"secret_versions":[],"ci_policies":[]}}';
+    assert.equal(h.downloads[0]!.size, Buffer.byteLength(compact), 'backup formatting must not exceed the compact server size cap');
     await h.click('백업 복구');
     const file = h.doc.querySelector<HTMLInputElement>('[name=backup]')!;
     assert.ok(file, 'restore file exists');
