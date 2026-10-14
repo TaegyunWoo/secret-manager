@@ -53,7 +53,27 @@ async function tempRoot(): Promise<string> {
 }
 const inspectProcesses=promisify(execFile);
 async function groupRunning(group: number): Promise<boolean> {
+  if (!exists(-group)) return false;
   // Exited Linux orphans may remain zombies; they cannot use a secret file.
+  if (process.platform==='linux') {
+    const inspected=new Set<string>();let member=false;
+    while (true) {
+      const pending=(await fs.readdir('/proc')).filter(pid=>/^[1-9][0-9]*$/.test(pid)&&!inspected.has(pid));
+      if (!pending.length) break;
+      for (const pid of pending) {
+        inspected.add(pid);let stat: string;
+        try { stat=await fs.readFile(`/proc/${pid}/stat`,'utf8'); }
+        catch(error) { if (['ENOENT','ESRCH'].includes((error as NodeJS.ErrnoException).code??'')) continue; throw error; }
+        // comm may contain spaces and closing parentheses; subsequent fields follow its last ')'.
+        const boundary=stat.lastIndexOf(')');const fields=stat.slice(boundary+1).trim().split(/\s+/);
+        if (boundary<0 || !/^[A-Za-z]$/.test(fields[0]??'') || !/^[0-9]+$/.test(fields[2]??'')) fail('process_state_unknown');
+        if (Number(fields[2])===group) {member=true;if (fields[0]!=='Z') return true;}
+      }
+      // Recheck newly appearing PIDs in case a group member forked and vanished during this scan.
+    }
+    if (!member && exists(-group)) fail('process_state_unknown');
+    return false;
+  }
   const {stdout}=await inspectProcesses('/bin/ps',['-eo','pgid=,stat='],{maxBuffer:4*1024*1024});
   return stdout.split('\n').some(line=>{const [id,state]=line.trim().split(/\s+/);return Number(id)===group && state && !state.startsWith('Z');});
 }

@@ -241,3 +241,27 @@ test('startup retains a live process group after its leader dies',async()=>{
     assert.equal((await f.run('process.exit(0)').result).code,0);assert.equal(await fs.readFile(join(orphan,'KEY'),'utf8'),fileValue);
   }finally {if(descendant){try{process.kill(descendant,'SIGKILL');}catch{}}await f.close();}
 });
+
+
+test('an exited empty group preserves child status and cleans files without a process-listing executable',async()=>{
+  const f=await fixture();try {
+    const preload=join(f.dir,'no-ps.cjs');
+    await fs.writeFile(preload,`const cp=require('child_process'),exec=cp.execFile;cp.execFile=function(file,...args){if(file==='/bin/ps'){const done=args.at(-1);queueMicrotask(()=>done(Object.assign(new Error('unavailable'),{code:'ENOENT'})));return;}return exec.call(this,file,...args)};`);
+    const out=await f.run('process.exit(7)',{},['--require',preload]).result;
+    assert.equal(out.code,7);assert.equal(out.stderr,'');assert.deepEqual(await fs.readdir(f.root),[]);
+  }finally{await f.close();}
+});
+
+test('Linux inspects live foreground descendants without ps and parses a command name containing parentheses',{skip:process.platform!=='linux'},async()=>{
+  const f=await fixture();let descendant:number|undefined;let running:ReturnType<typeof f.run>|undefined;
+  try {
+    const ready=join(f.dir,'proc-ready'),seen=join(f.dir,'proc-seen'),preload=join(f.dir,'no-ps.cjs');
+    await fs.writeFile(preload,`const fs=require('fs/promises'),read=fs.readdir;fs.readdir=async function(path,...args){const names=await read.call(this,path,...args);return path==='/proc'?[...names,'2147483647']:names};const cp=require('child_process'),exec=cp.execFile;cp.execFile=function(file,...args){if(file==='/bin/ps'){const done=args.at(-1);queueMicrotask(()=>done(Object.assign(new Error('unavailable'),{code:'ENOENT'})));return;}return exec.call(this,file,...args)};`);
+    const app=`const fs=require('fs');process.title='app ) R 0 999';process.on('SIGTERM',()=>setTimeout(()=>{fs.writeFileSync(${JSON.stringify(seen)},fs.readFileSync(process.env.SIGNING_KEY_FILE));process.exit(0)},250));fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid,path:process.env.SIGNING_KEY_FILE}));setInterval(()=>{},100);`;
+    running=f.run(`const {spawn}=require('child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(app)}],{stdio:'inherit'});child.unref();`,{},['--require',preload]);
+    const info=JSON.parse(await waitFile(ready));descendant=info.pid;
+    await new Promise(r=>setTimeout(r,100));assert.equal(await fs.readFile(info.path,'utf8'),fileValue);
+    running.child.kill('SIGTERM');const out=await running.result;
+    assert.equal(out.signal,'SIGTERM');assert.equal(await fs.readFile(seen,'utf8'),fileValue);assert.deepEqual(await fs.readdir(f.root),[]);
+  }finally {if(descendant){try{process.kill(descendant,'SIGKILL');}catch{}}if(running){running.child.kill('SIGKILL');await running.result;}await f.close();}
+});
