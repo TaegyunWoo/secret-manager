@@ -52,6 +52,34 @@ test('AES-GCM preserves leading BOM in PEM and environment values exactly', asyn
     assert.equal(await decrypt(encrypted, context, keyring), original);
   }
 });
+test('AES-GCM preserves 64 KiB and rejects noncanonical base64 padding', async () => {
+  const value = '\uFEFF' + 'x'.repeat(65533);
+  const record = await encrypt(value, context, keyring, 'current');
+  assert.equal(await decrypt(record, context, keyring), value);
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const padded = await encrypt('x', context, keyring, 'current');
+  const index = padded.ciphertext.length - 2;
+  const malformed = padded.ciphertext.slice(0, index) + alphabet[alphabet.indexOf(padded.ciphertext[index]!) + 1] + '=';
+  assert.deepEqual(Buffer.from(malformed, 'base64'), Buffer.from(padded.ciphertext, 'base64'));
+  await assert.rejects(decrypt({...padded, ciphertext: malformed}, context, keyring), error(500, 'decryption_failed'));
+});
+test('AES-GCM uses native base64 when available and preserves encoding checks', async () => {
+  const from = Object.getOwnPropertyDescriptor(Uint8Array, 'fromBase64');
+  const to = Object.getOwnPropertyDescriptor(Uint8Array.prototype, 'toBase64');
+  let encodes = 0, decodes = 0;
+  Object.defineProperty(Uint8Array, 'fromBase64', {configurable:true, value:(value:string) => {decodes++;return new Uint8Array(Buffer.from(value,'base64'));}});
+  Object.defineProperty(Uint8Array.prototype, 'toBase64', {configurable:true, value:function(this:Uint8Array) {encodes++;return Buffer.from(this).toString('base64');}});
+  try {
+    const value = '\uFEFF' + 'x'.repeat(65533);
+    const record = await encrypt(value, context, keyring, 'current');
+    assert.equal(await decrypt(record, context, keyring), value);
+    await assert.rejects(decrypt({...record,ciphertext:record.ciphertext+'\n'},context,keyring),error(500,'decryption_failed'));
+    assert(encodes > 0 && decodes > 0);
+  } finally {
+    if(from)Object.defineProperty(Uint8Array,'fromBase64',from);else Reflect.deleteProperty(Uint8Array,'fromBase64');
+    if(to)Object.defineProperty(Uint8Array.prototype,'toBase64',to);else Reflect.deleteProperty(Uint8Array.prototype,'toBase64');
+  }
+});
 test('AES-GCM rejects lone surrogates instead of storing replacement characters', async () => {
   for (const malformed of ['\uD800', '\uDFFF', 'prefix\uD800suffix']) {
     await assert.rejects(encrypt(malformed, context, keyring, 'current'), error(500, 'encryption_failed'));
@@ -69,6 +97,24 @@ test('old and current key versions both decrypt during rotation', async () => {
   assert.equal(await decrypt(old, context, keyring), 'old value');
   assert.equal(await decrypt(current, context, keyring), 'new value');
   await assert.rejects(decrypt(old, context, { current: keyring.current }), error(500, 'configuration_error'));
+});
+test('AES-GCM reuses imported key material without bypassing rotation or removal', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(crypto.subtle, 'importKey');
+  const original = crypto.subtle.importKey;
+  let calls = 0;
+  Object.defineProperty(crypto.subtle, 'importKey', {configurable:true,value:new Proxy(original,{apply(target,self,args){calls++;return Reflect.apply(target,self,args);}})});
+  const keys = {main:Buffer.alloc(32,77).toString('base64')};
+  try {
+    const record = await encrypt('value',context,keys,'main');
+    await Promise.all(Array.from({length:10},()=>decrypt(record,context,{...keys})));
+    assert.equal(calls,1);
+    keys.main=Buffer.alloc(32,78).toString('base64');
+    await assert.rejects(decrypt(record,context,keys),error(500,'decryption_failed'));
+    assert.equal(calls,2);
+    await assert.rejects(decrypt(record,context,{}),error(500,'configuration_error'));
+  } finally {
+    if(descriptor)Object.defineProperty(crypto.subtle,'importKey',descriptor);else Reflect.deleteProperty(crypto.subtle,'importKey');
+  }
 });
 test('tampered ciphertext and every swapped context field reject decryption safely', async () => {
   const record = await encrypt('secret plaintext', context, keyring, 'current');

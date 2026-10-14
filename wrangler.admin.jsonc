@@ -14,7 +14,7 @@
   }],
   "vars": {
     "ACCESS_ISSUER": "https://fancy-lab-0bd2.cloudflareaccess.com",
-    "ACCESS_AUD": "replace-with-access-application-aud",
+    "ACCESS_AUD": "b464c31b03bfaabfb7cb8ce5efe29d854f692890d9bcfcbc94b9955e1ee66749",
     "ACTIVE_KEY_ID": "key-2026-10"
   },
   "triggers": { "crons": ["0 * * * *"] },

@@ -11,8 +11,11 @@ export type Keyring = Record<string, string>;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const importedKeys = new Map<string, Promise<CryptoKey>>();
 
 function encode(bytes: Uint8Array): string {
+  const native = bytes as Uint8Array & {toBase64?: () => string};
+  if (typeof native.toBase64 === 'function') return native.toBase64();
   let binary = '';
   for (let offset = 0; offset < bytes.length; offset += 8192) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
@@ -24,7 +27,15 @@ function decode(value: string): Uint8Array<ArrayBuffer> {
   if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
     throw new Error('invalid_encoding');
   }
-  const bytes = Uint8Array.from(atob(value), character => character.charCodeAt(0));
+  const native = Uint8Array as typeof Uint8Array & {fromBase64?: (input: string) => Uint8Array<ArrayBuffer>};
+  let bytes: Uint8Array<ArrayBuffer>;
+  if (typeof native.fromBase64 === 'function') bytes = native.fromBase64(value);
+  else {
+    const binary = atob(value);
+    bytes = new Uint8Array(binary.length);
+    // String iteration and mapper calls dominate CPU for large file secrets.
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  }
   if (encode(bytes) !== value) throw new Error('invalid_encoding');
   return bytes;
 }
@@ -42,9 +53,16 @@ async function importKey(keyring: Keyring, keyId: string): Promise<CryptoKey> {
     if (!keyring || typeof keyId !== 'string' || !keyId || !Object.hasOwn(keyring, keyId)) {
       throw new Error('missing_key');
     }
-    const bytes = decode(keyring[keyId]!);
+    const material = keyring[keyId]!;
+    const cached = importedKeys.get(material);
+    if (cached) return await cached;
+    const bytes = decode(material);
     if (bytes.length !== 32) throw new Error('invalid_key');
-    return await crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    if (importedKeys.size >= 16) importedKeys.delete(importedKeys.keys().next().value!);
+    const imported = crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    importedKeys.set(material, imported);
+    try { return await imported; }
+    catch (error) { if (importedKeys.get(material) === imported) importedKeys.delete(material); throw error; }
   } catch {
     throw new AppError(500, 'configuration_error');
   }
