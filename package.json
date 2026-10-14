@@ -1,0 +1,26 @@
+{
+  "name": "personal-secret-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "psm": "dist/cli/index.js" },
+  "scripts": {
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "wrangler dev --config wrangler.admin.jsonc",
+    "dev:ci": "wrangler dev --config wrangler.ci.jsonc --port 8788",
+    "check": "npm run typecheck && npm test && npm run build",
+    "deploy:check": "wrangler deploy --dry-run --config wrangler.admin.jsonc && wrangler deploy --dry-run --config wrangler.ci.jsonc"
+  },
+  "dependencies": { "jose": "^6.1.0" },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20261014.0",
+    "@types/node": "^22.0.0",
+    "miniflare": "^4.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.0.0"
+  }
+}
