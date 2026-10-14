@@ -2,7 +2,7 @@
 
 개인 프로젝트의 환경변수와 PEM 키를 암호화해 저장하고, 개발 프로그램과 GitHub Actions에 필요한 값만 전달하는 도구다. 관리 Worker, CI 전용 Worker, D1, 웹 관리 화면과 TypeScript CLI로 구성한다.
 
-실제 Cloudflare 배포·Google 로그인·무료 CPU 한도 검증은 별도다. [운영 준비](docs/operations.md)의 출시 확인 목록을 완료하기 전에는 운영 검증이 끝난 것으로 간주하지 않는다.
+Cloudflare 무료 플랜의 [관리 화면](https://psm-admin.dnxprbs.workers.dev/)에 배포되어 있다. 본인 Google 계정으로 로그인해 프로젝트와 환경을 만든 다음 시크릿을 등록한다. 실제 로그인·CLI·Actions·백업 복구 검증 결과와 CPU 제한은 [운영 문서](docs/operations.md#운영-검증-결과)에 기록한다.
 
 ## 기술 구성
 
@@ -44,11 +44,11 @@ psm login
 psm run --project my-app --env dev -- npm run dev
 ```
 
-일반 값은 자식 프로세스의 환경변수로, 파일 값은 실행별 임시 파일 경로로 전달한다. 연결·권한·키 검증에 실패하면 프로그램을 시작하지 않는다. 자식 프로그램의 종료 코드를 반환한다.
+일반 값은 자식 프로세스의 환경변수로, 파일 값은 실행별 임시 파일 경로로 전달한다. CLI는 최대 100개 조회를 여러 요청으로 나누며 모든 응답을 검증한 뒤 프로그램을 시작한다. 연결·권한·키 검증에 실패하면 프로그램을 시작하지 않는다. 자식 프로그램의 종료 코드를 반환한다.
 
 GitHub Actions는 `--ci`로 실행하고 `id-token: write` 권한을 부여한다. 저장소·소유자의 숫자 ID, 브랜치, 워크플로와 대상 환경이 일치하는 활성 정책을 먼저 등록해야 한다. PR 이벤트에는 값을 제공하지 않는다.
 
-[수동 실행 예제](.github/workflows/consume-example.yml)는 `my-app` 프로젝트의 `ci` 환경에서 `API_TOKEN`과 `SIGNING_KEY`를 요청한다. [설정 예시](psm.example.json)의 주소를 실제 Worker 주소로 바꾸고 해당 워크플로를 허용하는 정책을 등록한 뒤 실행한다. 예제는 자식 프로세스가 값을 전달받았는지만 확인한다.
+[수동 실행 예제](.github/workflows/consume-example.yml)는 `my-app` 프로젝트의 `ci` 환경에서 `API_TOKEN`과 `SIGNING_KEY`를 요청한다. [설정 예시](psm.example.json)는 운영 Worker 주소를 사용한다. 예제의 프로젝트·환경·시크릿과 해당 워크플로를 허용하는 정책을 등록한 뒤 실행한다. 예제는 자식 프로세스가 값을 전달받았는지만 확인한다.
 
 ## 디렉터리
 

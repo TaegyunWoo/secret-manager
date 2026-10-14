@@ -1,6 +1,19 @@
 # 운영 준비와 복구
 
-실제 Cloudflare 배포와 무료 CPU 한도 검증은 아직 수행하지 않았다. 아래는 운영 계정에서 실행할 준비 절차이며, 공개 서비스의 준비 완료를 뜻하지 않는다. 보안 경계와 무료 운영 조건은 [승인된 설계](design.md)를 따른다.
+관리·CI Worker와 공유 D1을 Cloudflare 무료 플랜에 배포했다. [운영 검증 결과](#운영-검증-결과)는 실제 계정의 확인 범위와 CPU 제한을 기록한다. 보안 경계와 무료 운영 조건은 [승인된 설계](design.md)를 따른다.
+
+## 운영 환경
+
+| 항목 | 설정 |
+|---|---|
+| 관리 화면·API | https://psm-admin.dnxprbs.workers.dev |
+| CI 조회 API | https://psm-ci.dnxprbs.workers.dev/v1/resolve |
+| D1 | `psm`, `ee54dfa8-b727-4518-ad6d-a40001b27131`, APAC/HKG |
+| 스키마 | `0001_initial.sql`, `0002_staged_operations.sql` 적용 |
+| Access | Google 로그인 하나, 관리자 이메일 정확히 일치, 세션 1시간 |
+| 예약 정리 | 매시 정각 UTC, `0 * * * *` |
+
+Google OAuth 앱은 테스트 모드이며 등록한 본인 계정만 사용한다. Access는 관리 Worker 전체 트래픽에 적용한다. 운영 DB의 합성 검증 데이터와 CI 정책은 정리했으므로 사용할 프로젝트·환경·시크릿·정책을 새로 등록한다. 감사 기록은 보존한다.
 
 ## 계정과 인증 준비
 
@@ -10,7 +23,7 @@ Access에는 본인 Google 계정의 정확한 이메일을 **Include** 조건�
 
 Access application audience와 team issuer를 관리 Worker에 설정한다. `ADMIN_EMAIL`도 동일한 본인 이메일이어야 한다. CI Worker는 GitHub OIDC를 검증하므로 관리 Worker의 Access 정책을 해제해 CI에 개방하지 않는다.
 
-설정 원본은 [관리 Wrangler 설정](../wrangler.admin.jsonc), [CI Wrangler 설정](../wrangler.ci.jsonc), [로컬 Secret 예시](../.dev.vars.example)다. 예시의 계정 값과 키는 사용할 수 있는 운영 설정이 아니다.
+설정 원본은 [관리 Wrangler 설정](../wrangler.admin.jsonc), [CI Wrangler 설정](../wrangler.ci.jsonc), [로컬 Secret 예시](../.dev.vars.example)다. Wrangler 설정에는 실제 운영 리소스 ID를 사용한다. 로컬 Secret 예시에 있는 키는 운영에 사용하지 않는다.
 
 | 설정 | 대상 | 용도 |
 |---|---|---|
@@ -56,7 +69,7 @@ URL은 HTTPS origin만 허용하고 로컬 테스트의 loopback HTTP는 예외�
 
 macOS는 시스템 `/bin/ps`를, Linux는 커널의 `/proc/<PID>/stat`을 읽어 실행 그룹의 종료를 확인한다. Linux에 별도의 ps 또는 procps 패키지를 설치할 필요는 없다. 종료한 좀비 프로세스는 파일을 사용할 수 없으므로 실행 종료 판단에서 제외한다. 상태 조회에 실패하면 파일을 보존한다. Windows와 스스로 새 세션·그룹으로 이탈하는 데몬은 지원 범위 밖이다. 그룹이 종료하지 않으면 CLI도 기다리므로 종료 처리를 무시하는 프로그램은 별도로 종료해야 한다.
 
-HTTP 요청 제한 시간은 30초이며 조회 응답은 최대 40 MiB, GitHub 토큰 응답은 최대 64 KiB다. 조회 응답 제한은 여러 값의 JSON 이스케이프를 포함하기 위한 전송 상한이다. 토큰 발급 요청은 GitHub Actions의 HTTPS 호스트로만 보내고 리디렉션을 따라가지 않는다. 누락된 값·종류 불일치·조회 실패는 프로그램 실행 전에 거부한다.
+CLI HTTP 요청 제한 시간은 요청별 30초이며 조회 응답은 최대 40 MiB, GitHub 토큰 응답은 최대 64 KiB다. CLI는 최대 100개 이름을 10개씩 요청한다. 서버가 합산 암호문 크기로 분할을 요구하면 해당 묶음을 더 나눈다. 모든 조각의 이름·종류·값과 전체 결과가 일치해야 자식 프로그램을 실행한다. 토큰 발급 요청은 GitHub Actions의 HTTPS 호스트로만 보내고 리디렉션을 따라가지 않는다.
 
 ## 복호화 키
 
@@ -75,7 +88,7 @@ HTTP 요청 제한 시간은 30초이며 조회 응답은 최대 40 MiB, GitHub 
 
 ## 배포 절차
 
-다음 명령은 운영 배포 때 사용할 명령이다. 이 구현 작업에서는 실제 계정 생성·마이그레이션·배포를 실행하지 않았다.
+기존 운영 환경을 갱신할 때는 4번과 6번을 실행한다. 다른 계정에 처음 배포할 때는 아래 전체 절차를 따른다. 운영 DB를 중복 생성하지 않는다.
 
 1. `npx wrangler login`으로 운영 계정에 로그인한다.
 2. `npx wrangler d1 create psm`으로 DB를 만들고 반환된 ID를 두 `wrangler.*.jsonc` 파일의 `database_id`에 같은 값으로 설정한다.
@@ -95,7 +108,9 @@ HTTP 요청 제한 시간은 30초이며 조회 응답은 최대 40 MiB, GitHub 
 
 복구는 프로젝트, 환경, 시크릿, 버전, CI 정책이 없는 대상에서만 허용한다. 인증·복구 시도로 생긴 감사 기록은 남아 있어도 되며 유지한다. 복구 전에 참조 무결성과 암호문 복호화를 검증한다. 복구된 CI 정책은 비활성 상태로 시작한다.
 
-앱 백업은 JSON 전체 1 MiB와 테이블별 1,000행 이내로 제한한다. 한도를 넘으면 내보내기를 거부하며 일부 행만 저장하지 않는다. 백업 규모가 이 한도에 가까워지면 실제 복구까지 검증하고, 규모에 맞는 별도 백업 방식을 준비한다.
+앱 백업은 JSON 전체 1 MiB와 테이블별 1,000행 이내로 제한한다. 한도를 넘으면 내보내기를 거부하며 일부 행만 저장하지 않는다. 큰 백업은 서버에서 하나의 스냅샷을 만든 뒤 조각별로 내려받는다. 복구 화면은 암호문 버전을 한 개씩 검증하고 전체 준비가 끝난 뒤 한 트랜잭션으로 반영한다. 도중 실패하면 일부 업무 데이터만 복구하지 않는다.
+
+분할 작업은 같은 관리자만 접근할 수 있고 10분 후 만료된다. 취소 시 준비 조각을 삭제하며 만료된 작업은 Cron이 정리한다. 동시 준비·내보내기는 전체 8개까지 허용한다. 백업에는 준비 작업의 내부 테이블을 포함하지 않는다.
 
 D1 Time Travel은 DB 전체 상태 복구이고 개별 키 이력과 별개다. 무료 보존 범위는 [설계의 한도 표](design.md)를 참고한다. Time Travel로 예전 활성 정책까지 되돌릴 수 있으므로, 복구 작업 중에는 CI 접근을 중지하고 정책을 확인한 후 재개한다. [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
 
@@ -121,16 +136,37 @@ D1 Time Travel은 DB 전체 상태 복구이고 개별 키 이력과 별개다. 
 
 2026-10-14 확인 기준으로 무료 D1은 Worker 호출당 쿼리 50개와 SQL당 바인딩 100개 제한도 있다. 배치의 각 SQL에도 개별 한도가 적용되므로 HTTP 요청 수만으로 사용량을 판단하지 않는다. [D1 한도](https://developers.cloudflare.com/d1/platform/limits/)
 
-앱은 값 하나를 UTF-8 기준 64 KiB, 한 번에 조회하거나 가져오는 시크릿을 100개, dotenv 가져오기 입력을 128 KiB로 제한한다. Cron은 한 번에 만료된 시크릿 최대 100개와 감사 기록 최대 100개를 정리한다. 이 제한은 CPU 한도 충족을 보장하지 않으므로 실제 계정에서 측정해야 한다.
+앱은 값 하나를 UTF-8 기준 64 KiB, 전체 조회·가져오기를 100개, dotenv 가져오기 입력을 128 KiB로 제한한다. 웹과 CLI가 큰 작업을 여러 요청으로 나눈다. Cron은 한 번에 만료된 준비 작업, 시크릿과 감사 기록을 각각 최대 100개 정리한다. 이 제한은 CPU 한도 충족을 보장하지 않는다.
+
+## 운영 검증 결과
+
+2026-10-15 KST에 무료 Workers와 Zero Trust Free를 확인하고 합성 데이터로 다음 항목을 검증했다. 서버 구현 근거는 [분할 처리 소스](../src/shared/operations.ts), [CLI 조회](../src/cli/client.ts), [웹](../public/app.js)이며, 배포 코드 기준은 `4bad64a`와 복구 화면의 단일 버전 분할 조정이다.
+
+| 항목 | 실제 확인 |
+|---|---|
+| 인증 | 본인 Google 웹 로그인, cloudflared 로그인, issuer·audience·이메일·1시간 세션 확인. 무인증 관리 자산·API 차단과 CI 401 확인 |
+| CLI | 100개 조회, 64 KiB 파일 두 개의 바이트·SHA256, 파일 0600·디렉터리 0700, 종료 코드 0·7과 종료 후 삭제 |
+| Actions | [현재 분할 버전의 실제 OIDC·CLI 실행](https://github.com/TaegyunWoo/secret-manager/actions/runs/38592301910) 성공. 20회 조회와 파일 바이트·권한·종료 정리 확인 |
+| 거부 조건 | 실제 서명 토큰으로 [다른 워크플로](https://github.com/TaegyunWoo/secret-manager/actions/runs/38578432142), [다른 브랜치](https://github.com/TaegyunWoo/secret-manager/actions/runs/38578435409), [PR](https://github.com/TaegyunWoo/secret-manager/actions/runs/38578447186), [비활성 정책](https://github.com/TaegyunWoo/secret-manager/actions/runs/38580377755) 403 확인 |
+| 가져오기 | API와 실제 웹에서 100개 분할 적용. 준비 중 메타데이터 미노출, 완료 재시도, stale 버전의 전체 충돌 거부 |
+| 복구 | 암호문 300,813 bytes 백업을 별도 빈 원격 D1에 분할 복구. 암호문 행 일치, 큰 파일 해시·바이트 일치, 모든 CI 정책 비활성, 기존 데이터 대상 409 |
+| Cron | 만료 시크릿·버전·감사 기록 삭제와 만료 준비 작업·조각 삭제 확인. 시간당 스케줄 유지 |
+| 로그·사용량 | 실시간 tail의 원문 로그·예외 0, 관측 outcome 모두 `ok`. 운영 D1 503,808 bytes. 합성 업무 데이터·임시 리소스 정리 |
+
+CPU는 요청별 실시간 tail의 `cpuTime`을 사용했다. 값·헤더·토큰은 기록하지 않았다. 관리 조회 46개 표본은 중앙값 3ms, 95백분위 11ms, 최대 14ms였다. 복구 준비를 한 버전씩 나눈 155개 표본은 중앙값 4ms, 95백분위 7ms, 최대 20ms였고 3개가 10ms를 넘었다. 64 KiB 최초 저장에서는 최대 29ms도 관측했다. 표본에서 `exceededCpu`는 없었으나 모든 요청의 무료 CPU 상한 충족을 증명하지는 못했다.
+
+[Cloudflare 공식 한도](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)는 확인일 기준 요청당 10ms다. 런타임은 드문 초과를 허용하지만 반복 초과 시 종료할 수 있다. 최대 크기의 값을 지속 처리할 때 무료 플랜의 안정성을 보장하지 않는다. Metrics의 `Exceeded CPU Time Limits`를 확인하고, 실제 사용에서 반복되면 값 크기·처리량을 줄이거나 CPU 여유가 있는 실행 환경을 사용한다. 분할은 요청과 D1 쓰기 수를 늘리므로 일일 요청·행 쓰기 한도도 함께 확인한다.
+
+GraphQL 재조회는 처음 rate budget 제한으로 실패한 뒤 대기 후 성공했다. 2026-10-14 15:44~22:41 UTC 집계는 관리 Worker 210회, CI Worker 23회이며 두 Worker의 런타임 오류는 0이다. 같은 UTC 날짜의 운영·검증 D1 합산은 읽은 행 349,420개, 쓴 행 23,103개다. [D1 공식 집계](https://developers.cloudflare.com/d1/observability/metrics-analytics/)로 확인했으며 무료 일일 읽기·쓰기 한도 이내다. 측정 표본을 전체 트래픽의 CPU 백분위로 해석하지 않는다. 공개 로그의 영구 수집은 꺼져 있다.
 
 ## 출시 확인 목록
 
-- [ ] 관리 주소와 preview 직접 접근에서 인증 없이 API와 자산을 받지 못한다.
-- [ ] 본인 Google 계정만 로그인할 수 있고 세션은 1시간이다.
-- [ ] 로컬 CLI의 cloudflared 로그인과 프로그램 실행이 동작한다.
-- [ ] 허용된 Actions에서만 조회되며 PR, 다른 브랜치·워크플로, 비활성 정책은 거부된다.
-- [ ] 운영 로그와 공개 빌드에 실제 비밀값·토큰이 없다.
-- [ ] 암호문 백업을 빈 대상에 복구하고 원문을 확인했다.
+- [x] 관리 주소에서 무인증 API·자산 요청을 차단하며 preview URL을 비활성화했다.
+- [x] 본인 Google 계정 허용과 세션 1시간을 설정하고 실제 로그인했다.
+- [x] 로컬 CLI의 cloudflared 로그인과 프로그램 실행을 확인했다.
+- [x] 허용된 Actions 조회와 PR·다른 브랜치·워크플로·비활성 정책 거부를 확인했다.
+- [x] 실시간 로그에 값·토큰을 출력하지 않고 실제 키는 Worker Secret으로 등록했다.
+- [x] 암호문 백업을 빈 원격 대상에 복구하고 원문 해시와 바이트를 확인했다.
 - [ ] 두 Worker의 인증·암호화·조회·복구·예약 작업이 무료 한도를 충족한다.
 
-이 목록은 로컬 자동 테스트만으로 완료 처리하지 않는다.
+마지막 항목은 일부 CPU 표본이 10ms를 넘으므로 미완료다. 성공한 실행을 무료 CPU 한도의 보장으로 바꾸지 않는다.

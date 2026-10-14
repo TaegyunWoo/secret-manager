@@ -518,7 +518,7 @@ test('large backup is paged from one snapshot and large restore stages instead o
     await h.click('백업 복구');const file=h.doc.querySelector<HTMLInputElement>('[name=backup]')!;
     Object.defineProperty(file,'files',{value:[{size:Buffer.byteLength(JSON.stringify(backup)),text:async()=>JSON.stringify(backup)}]});file.dispatchEvent(new h.window.Event('change'));await settle();await h.submit();await h.click('복구 확인');
     assert(!h.requests.some(r=>r.path==='/api/backup/restore'));
-    assert.deepEqual(h.requests.filter(r=>r.path==='/api/operations/restore-1/chunks').map(r=>r.body.rows.length),[10,1]);
+    assert.deepEqual(h.requests.filter(r=>r.path==='/api/operations/restore-1/chunks').map(r=>r.body.rows.length),Array(11).fill(1), 'restore validates one ciphertext version per request to reduce measured verification CPU');
     assert(h.requests.some(r=>r.path==='/api/operations/restore-1/commit'));
   }finally{h.dom.window.close();}
 });

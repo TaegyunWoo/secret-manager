@@ -2,6 +2,8 @@
 
 계획: [구현 계획](superpowers/plans/2026-10-14-implementation.md).
 
+아래 초기 구현 기록은 당시 상태를 보존한다. 현재 배포와 검증 범위는 마지막의 운영 배포 기록과 [운영 문서](operations.md#운영-검증-결과)를 따른다.
+
 - 승인된 설계와 사용자 구현 요청을 확인했다. 추가 설계 승인은 필요하지 않다.
 - 시작 상태: 설계와 승인 기록만 있으며 Git 저장소와 소스코드, 테스트는 없다.
 - 결정: 기존 작업과 충돌할 코드가 없는 새 디렉터리에서 직접 구현한다. Git 초기화 후 구현 브랜치를 사용한다.
@@ -44,3 +46,13 @@
 최종 수정 커밋은 `e552d13`, `c38c4bd`다. 독립 리뷰어가 수정 범위와 회귀 테스트, 두 운영체제의 검증 결과를 확인했으며, 지적 4건 모두 해결되고 새 결함이 없다고 승인했다. 구현은 로컬 `feat/initial-implementation` 브랜치에 보관한다.
 
 실제 Cloudflare 배포, Google 계정 로그인, cloudflared 인증, GitHub Actions 실행 및 무료 CPU 한도는 아직 검증하지 않았다. [운영 준비](operations.md)의 출시 확인 목록을 따른다.
+
+## 운영 배포 기록 — 2026-10-15
+
+사용자 승인에 따라 구현을 main에 통합하고 `TaegyunWoo/secret-manager`에 푸시했다. Cloudflare 무료 Workers 두 개와 공유 D1을 배포하고 Google Access를 연결했다. 실제 웹·cloudflared 로그인, OIDC 성공·거부 조건, CLI 파일 바이트·권한·종료 정리, 빈 원격 DB 복구와 실제 Cron 삭제를 확인했다. 운영 리소스와 증거 링크는 [운영 검증 결과](operations.md#운영-검증-결과)에 모았다.
+
+최대 100개를 한 요청에서 처리할 때 무료 CPU 목표를 반복해서 넘었다. 사용자는 큰 작업을 여러 요청으로 나누는 방식을 선택했다. [분할 처리 계획](superpowers/plans/2026-10-14-free-batches.md)에 따라 조회 묶음, 원자적 가져오기·복구 준비, 암호문 스냅샷 페이지, 작업 만료 정리를 구현했다. 복구의 버전 검증은 실측 후 웹에서 한 개씩 요청하도록 조정했다.
+
+분할 구현 커밋 `4bad64a`의 [Linux·macOS Checks](https://github.com/TaegyunWoo/secret-manager/actions/runs/38591339885)와 [실제 OIDC·CLI 검증](https://github.com/TaegyunWoo/secret-manager/actions/runs/38592301910)이 성공했다. 복구 조정 뒤 `npm run check`는 macOS에서 117개 중 116개 통과, Linux 전용 1개 제외이며 타입 검사·빌드가 성공했다. 전체 분할 구현의 독립 리뷰 지적 두 건을 재현해 수정했고, 한 버전 분할 조정도 재검토에서 차단 지적이 없었다.
+
+실제 100개 가져오기·조회, 64 KiB 파일 두 개를 포함한 CLI, 300,813 bytes 백업의 분할 복구를 검증했다. 검증용 합성 업무 데이터와 전용 임시 Worker·D1을 삭제하고 감사 기록은 남겼다. 무료 플랜 배포는 완료했으나 일부 CPU 표본이 10ms를 넘으므로 모든 요청의 무료 CPU 상한 충족은 확인하지 못했다.

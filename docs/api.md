@@ -47,12 +47,40 @@ ID는 서버가 생성한 UUID이며 클라이언트가 지정하지 않는다. 
 | `GET /api/audit-events` | 선택 쿼리 `limit` | `{events}` |
 | `GET /api/backup` | 없음 | 암호문 백업 |
 | `POST /api/backup/restore` | 암호문 백업 전체 | `{ok:true}` |
+| `POST /api/operations` | 아래 작업 생성 필드 | 작업 메타데이터, 201 |
+| `GET /api/operations/:id` | 없음 | 작업 메타데이터 |
+| `POST /api/operations/:id/chunks` | `{index,table,rows}` | `{ok:true}` |
+| `GET /api/operations/:id/chunks` | 쿼리 `table`, `index` | `{rows,nextIndex}` |
+| `POST /api/operations/:id/commit` | `{}` | `{ok:true}` |
+| `DELETE /api/operations/:id` | `{}` | `{ok:true}` |
 
 하위 항목이 남아 있는 프로젝트와 환경은 삭제할 수 없다. 시크릿 삭제는 휴지통으로 이동하며 이름을 계속 예약한다. 보존 기간과 입력 크기 제한은 [운영 문서](operations.md)에 명시한다.
 
 `expectedVersionId`에는 마지막으로 조회한 시크릿의 `currentVersionId`를 넣는다. 그 사이 다른 요청이 값을 수정했으면 `409 conflict`를 반환한다. 최신 목록을 다시 읽어 사용자가 변경 내용을 확인한 뒤 재시도한다. 이력 복원도 새 버전을 만든다.
 
 가져오기 미리보기의 각 항목은 `{name,value,exists,deleted,expectedVersionId?}`다. 적용 요청의 `entries`에는 사용자가 선택한 `{name,value,expectedVersionId?}`만 넣는다. 기존 항목을 덮어쓸 때는 미리보기의 버전 ID를 유지한다. 하나라도 충돌하면 전체 적용을 거부한다. 미리보기는 원래 입력값을 반환하므로 화면에서는 이름과 충돌 상태만 표시한다.
+
+## 큰 작업의 분할 처리
+
+조회는 전체 최대 100개 이름을 허용하되 요청별 10개 이하, 합산 현재 암호문 87,404 bytes 이하로 나눈다. 관리·CI 조회가 이 요청 상한을 넘으면 `413 chunk_required`와 `x-psm-chunk-required: 1`을 반환한다. CLI는 10개씩 요청하고 크기 힌트에 따라 해당 묶음을 이분한다. 그 외 오류를 분할 재시도로 처리하지 않는다.
+
+작업 API의 구현은 [Operations](../src/shared/operations.ts)다. 생성한 관리자만 접근하며 10분 뒤 만료된다. 전체 동시 `preparing`·`ready` 작업은 8개로 제한한다. 상태는 `preparing`, `ready`, `committed`, `cancelled`이고 메타데이터에는 ID, 종류, 테이블별 counts, createdAt, expiresAt, nextIndex, 누적 bytes가 포함된다.
+
+| 종류 | 생성 본문 | 처리 |
+|---|---|---|
+| 가져오기 | `{kind:"import",environmentId,counts:{imports:N}}` | 전체 1-100개, `imports` 조각 준비 후 commit |
+| 복구 | `{kind:"restore",createdAt,counts}` | 원본 백업 시각과 여섯 테이블의 정확한 행 수, 조각 준비 후 commit |
+| 내보내기 | `{kind:"export"}` | 서버가 한 트랜잭션으로 스냅샷과 counts 생성, 페이지 조회 후 DELETE |
+
+조각 index는 작업 전체에서 0부터 연속 증가한다. 복구는 `projects`, `environments`, `secrets`, `secret_versions`, `ci_policies`, `audit_events` 순서로 보낸다. 행 수가 0인 테이블은 건너뛴다. 테이블별 전체 counts와 누적 입력 상한을 넘길 수 없다.
+
+가져오기 조각은 최대 10개, 값의 합산 UTF-8 크기 64 KiB 이하다. 저장 준비 데이터는 서버에서 암호화하며 값은 업무 목록에 노출하지 않는다. 전체 entries JSON은 128 KiB 이하다. commit은 모든 조각의 준비 완료와 버전 충돌을 다시 확인하고 전체를 원자적으로 반영한다. 완료한 commit은 작업 만료 전까지 재시도할 수 있다.
+
+복구 조각은 JSON 90,000 bytes 이하이며 암호문 버전 최대 10행, 그 외 테이블 최대 100행이다. 무료 CPU를 줄이기 위해 웹은 암호문 버전을 한 행씩 보낸다. 전체 백업은 1 MiB·테이블별 1,000행 한도를 유지한다. 복호화·참조 검증을 거친 뒤 빈 대상에 원자적으로 반영하고 CI 정책은 비활성화한다.
+
+내보내기 페이지는 암호문 버전 최대 10행, 메타데이터 최대 100행이고 JSON 크기에도 상한을 적용한다. `nextIndex: null`이면 해당 테이블의 마지막 페이지다. 작업 준비 후 업무 데이터가 바뀌어도 같은 스냅샷의 행을 반환한다. 원래 `GET /api/backup`과 `POST /api/backup/restore`는 작은 백업에 유지하며 큰 요청에는 분할 힌트를 반환한다.
+
+DELETE는 작업을 취소하고 조각을 제거한다. 이미 완료한 commit의 재시도 기록은 유지한다. 만료 작업과 조각은 Cron이 제거한다. 분할 호출에도 원래 인증·Origin·감사 기록 규칙을 적용한다.
 
 ## 자원 필드
 
@@ -109,8 +137,8 @@ CI Worker의 유일한 기능 경로는 `POST /v1/resolve`다. 관리 API는 제
 | 401 | `unauthorized`: 토큰을 다시 발급하고 인증 설정 확인 |
 | 403 | `forbidden`, `forbidden_origin`: 관리자 또는 CI 정책, 요청 origin 확인 |
 | 404 | `not_found`: 경로와 자원, 요청한 시크릿 이름 확인 |
-| 409 | `conflict`: 최신 상태를 다시 읽고 이름 중복·버전 충돌·하위 자원 확인 |
-| 413 | `payload_too_large`, `backup_too_large`: 입력 또는 백업 한도 확인 |
+| 409 | `conflict`, `operation_expired`: 이름·버전·순서·대상 충돌 또는 작업 만료 확인 |
+| 413 | `chunk_required`: 크기 힌트가 있으면 더 작은 조회나 작업 API 사용. `payload_too_large`, `backup_too_large`: 전체 상한 확인 |
 | 415 | `unsupported_media_type`: `application/json` 사용 |
 | 500 | 안전한 내부 오류 코드: Worker 설정·DB·키 묶음 확인 |
 

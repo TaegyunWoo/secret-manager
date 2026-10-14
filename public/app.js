@@ -145,7 +145,7 @@
     for (const table of backupTables) {
       if (!Array.isArray(backup.tables[table])) throw new Error(errors[400]);
       counts[table] = backup.tables[table].length;
-      groups.push(...splitRows(backup.tables[table], table === 'secret_versions' ? 10 : 100).map((rows) => [table, rows]));
+      groups.push(...splitRows(backup.tables[table], table === 'secret_versions' ? 1 : 100).map((rows) => [table, rows]));
     }
     return preparedOperation({ kind: 'restore', counts, createdAt: backup.createdAt }, groups, current);
   }
