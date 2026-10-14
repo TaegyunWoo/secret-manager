@@ -10,7 +10,7 @@ export interface CipherRecord { ciphertext: string; nonce: string; keyId: string
 export type Keyring = Record<string, string>;
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder('utf-8', { fatal: true });
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 function encode(bytes: Uint8Array): string {
   let binary = '';

@@ -46,6 +46,12 @@ test('AES-GCM preserves PEM CRLF and unicode exactly', async () => {
   assert.equal(await decrypt(encrypted, context, keyring), pem);
   assert.ok(!encrypted.ciphertext.includes('PRIVATE KEY'));
 });
+test('AES-GCM preserves leading BOM in PEM and environment values exactly', async () => {
+  for (const original of ['\uFEFF-----BEGIN PRIVATE KEY-----\r\nvalue\r\n-----END PRIVATE KEY-----\r\n', '\uFEFFenvironment-value']) {
+    const encrypted = await encrypt(original, context, keyring, 'current');
+    assert.equal(await decrypt(encrypted, context, keyring), original);
+  }
+});
 test('every encryption uses a fresh nonce', async () => {
   const records = await Promise.all(Array.from({ length: 64 }, () => encrypt('same value', context, keyring, 'current')));
   assert.equal(new Set(records.map(record => record.nonce)).size, 64);
