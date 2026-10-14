@@ -1,14 +1,17 @@
-name: Secret consumption example
+name: Rollout CI rejection verification
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  consume:
+  assert-denied:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'verify/rollout-ci-denials'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -21,9 +24,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      # Register a matching active CI policy for this workflow before running.
-      - name: Run a command with declared secrets
-        run: >-
-          node dist/cli/index.js run --ci --project my-app --env ci
-          --config psm.example.json --
-          node -e 'const fs = require("node:fs"); if (!process.env.API_TOKEN || !process.env.SIGNING_KEY_FILE || !fs.existsSync(process.env.SIGNING_KEY_FILE)) process.exit(1); console.log("Declared secrets are available to the child process.");'
+      - name: Assert authenticated request is forbidden
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { githubToken } from './dist/cli/client.js';
+          const origin = 'https://psm-ci.dnxprbs.workers.dev';
+          const token = await githubToken(origin);
+          const response = await fetch(origin + '/v1/resolve', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ project: 'my-app', environment: 'ci', names: ['API_TOKEN', 'SIGNING_KEY'] }),
+            redirect: 'error',
+          });
+          assert.equal(response.status, 403);
+          assert.equal((await response.json()).error.code, 'forbidden');
+          console.log('Signed GitHub OIDC request was rejected with HTTP 403.');
+          NODE
