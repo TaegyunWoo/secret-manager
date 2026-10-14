@@ -1,0 +1,9 @@
+# Copy to .dev.vars and fill with private local configuration.
+# No authentication bypass is provided in local development.
+ACCESS_ISSUER="https://your-team.cloudflareaccess.com"
+ACCESS_AUD="replace-with-access-application-aud"
+ADMIN_EMAIL="you@example.com"
+CI_AUDIENCE="https://psm-ci.your-subdomain.workers.dev"
+ACTIVE_KEY_ID="key-2026-10"
+# Replace with a base64-encoded cryptographically random 32-byte key.
+KEYRING_JSON='{"key-2026-10":"replace-with-generated-base64-key"}'

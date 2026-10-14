@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "psm-ci",
+  "main": "src/ci/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "d1_databases": [{
+    "binding": "DB", "database_name": "psm",
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "migrations"
+  }],
+  "vars": {
+    "CI_AUDIENCE": "https://psm-ci.your-subdomain.workers.dev",
+    "ACTIVE_KEY_ID": "key-2026-10"
+  },
+  "observability": { "enabled": false }
+}
