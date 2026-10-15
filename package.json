@@ -13,6 +13,7 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
+    "skill:install": "node scripts/install-skill.mjs",
     "dev": "wrangler dev --config wrangler.admin.jsonc",
     "dev:ci": "wrangler dev --config wrangler.ci.jsonc --port 8788",
     "check": "npm run typecheck && npm test && npm run build",

@@ -9,10 +9,23 @@ export function cloudflared(args: string[]): Promise<string> {
 export async function login(config: Config): Promise<void> { await cloudflared(['access','login',config.adminUrl]); }
 
 // 100 x 64 KiB values may each expand sixfold in JSON; 40 MiB bounds that maximum.
-export async function requestJson(url: string, options: RequestInit, maxBytes = 40 * 1024 * 1024): Promise<unknown> {
+const adminErrors = new Set(['invalid_input','not_found','conflict','chunk_required','payload_too_large','operation_expired','storage_error','configuration_error']);
+export async function requestJson(url: string, options: RequestInit, maxBytes = 40 * 1024 * 1024, admin = false): Promise<unknown> {
   try {
     const response = await fetch(url,{...options,redirect:'error',signal:AbortSignal.timeout(30000)});
     if (!response.ok) {
+      if (admin && response.status === 401) { await response.body?.cancel(); throw new AppError(401, 'login_required'); }
+      if (admin && response.body) {
+        const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
+        try {
+          for (;;) { const next = await reader.read(); if (next.done) break; bytes += next.value.length; if (bytes > 4096) break; chunks.push(next.value); }
+        } finally { await reader.cancel(); }
+        if (bytes <= 4096) {
+          let body: unknown; try { body = strictJson(Buffer.concat(chunks).toString('utf8')); } catch { fail('request_failed'); }
+          if (object(body) && object(body.error) && typeof body.error.code === 'string' && adminErrors.has(body.error.code)) throw new AppError(response.status, body.error.code);
+        }
+        fail('request_failed');
+      }
       await response.body?.cancel();
       if (response.status === 413 && response.headers.get('x-psm-chunk-required') === '1') throw new AppError(413, 'chunk_required');
       fail('request_failed');
@@ -22,7 +35,7 @@ export async function requestJson(url: string, options: RequestInit, maxBytes = 
     const chunks: Uint8Array[] = []; let size = 0;
     for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > maxBytes) { await reader.cancel(); fail('response_too_large'); } chunks.push(next.value); }
     return strictJson(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)));
-  } catch (error) { if (error instanceof AppError && error.code === 'chunk_required') throw error; fail('request_failed'); }
+  } catch (error) { if (error instanceof AppError && (error.code === 'chunk_required' || (admin && (adminErrors.has(error.code) || error.code === 'login_required')))) throw error; fail('request_failed'); }
 }
 export async function githubToken(ciUrl: string): Promise<string> {
   const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL, credential = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
