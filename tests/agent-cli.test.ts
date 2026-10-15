@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
 import { createServer } from 'node:http';
+import { createHash, createHmac } from 'node:crypto';
 import { agentFixture } from './helpers/agent.js';
 
 test('secret input preserves UTF-8 file bytes and refuses ambiguous, oversized and invalid input', async () => {
@@ -172,6 +173,54 @@ test('import preview hides values and pins input, kind changes and observed vers
     assert.doesNotMatch(out.stdout,/synthetic-new-value|\$\{HOME\}/);
     assert.equal((await f.store.reveal(old.id)).value,'synthetic-new-value'); assert.equal((await f.store.reveal(old.id)).kind,'env');
     out=await f.cli(['import','apply','--file',file,'--plan',plan,'--confirm']); assert.equal(out.code,1); assert.match(out.stderr,/conflict/);
+  } finally { await f.close(); }
+});
+
+test('import plans use a private local key so preview output cannot verify secret guesses', async () => {
+  const f = await agentFixture();
+  try {
+    assert.equal((await f.cli(['init','--admin-url',f.url])).code, 0);
+    const file = join(f.dir,'pin.env'), plan = join(f.dir,'plan.json');
+    const source = 'ADMIN_PIN=0427\n'; await fs.writeFile(file,source);
+    let out = await f.cli(['import','preview','--file',file]); assert.equal(out.code,0,out.stderr);
+    const preview = JSON.parse(out.stdout);
+    assert.equal(preview.version,2);
+    assert.equal(preview.entries[0].value,undefined);
+    assert(!out.stdout.includes(createHash('sha256').update(source).digest('hex')));
+    const keyPath = join(f.env.XDG_CONFIG_HOME,'psm','import.key');
+    const key = await fs.readFile(keyPath);
+    assert.equal(key.length,32); assert.equal((await fs.stat(keyPath)).mode & 0o777,0o600);
+    assert.equal((await fs.stat(join(f.env.XDG_CONFIG_HOME,'psm'))).mode & 0o777,0o700);
+    assert.equal(preview.sourceTag,createHmac('sha256',key).update(source).digest('hex'));
+    assert(!out.stdout.includes(key.toString('hex'))); assert(!out.stdout.includes(key.toString('base64')));
+    await fs.writeFile(plan,out.stdout);
+    out = await f.cli(['import','preview','--file',file],{extra:{XDG_CONFIG_HOME:join(f.dir,'other-settings')}});
+    assert.equal(out.code,0,out.stderr); assert.notEqual(JSON.parse(out.stdout).sourceTag,preview.sourceTag);
+    out = await f.cli(['import','apply','--file',file,'--plan',plan]); assert.equal(out.code,0,out.stderr);
+    assert.equal((await f.store.resolve('new-app','dev',['ADMIN_PIN'])).secrets[0]!.value,'0427');
+  } finally { await f.close(); }
+});
+
+test('import refuses exposed or linked local keys and legacy unkeyed plans', async () => {
+  const f = await agentFixture();
+  try {
+    assert.equal((await f.cli(['init','--admin-url',f.url])).code,0);
+    const file=join(f.dir,'input.env'),plan=join(f.dir,'plan.json'),keyPath=join(f.env.XDG_CONFIG_HOME,'psm','import.key');
+    await fs.writeFile(file,'TOKEN=synthetic-input\n');
+    await fs.mkdir(join(f.env.XDG_CONFIG_HOME,'psm'),{recursive:true,mode:0o700});
+    await fs.writeFile(keyPath,Buffer.alloc(32,7),{mode:0o600});
+    let out=await f.cli(['import','preview','--file',file]); assert.equal(out.code,0,out.stderr);
+    const preview=JSON.parse(out.stdout); await fs.writeFile(plan,out.stdout);
+    await fs.chmod(keyPath,0o644);
+    out=await f.cli(['import','apply','--file',file,'--plan',plan]); assert.equal(out.code,1); assert.match(out.stderr,/invalid_import_key/);
+    await fs.chmod(keyPath,0o600);
+    await fs.rename(keyPath,`${keyPath}.original`); await fs.symlink(`${keyPath}.original`,keyPath);
+    out=await f.cli(['import','preview','--file',file]); assert.equal(out.code,1); assert.match(out.stderr,/invalid_import_key/);
+    await fs.unlink(keyPath); await fs.rename(`${keyPath}.original`,keyPath);
+    delete preview.sourceTag; Object.assign(preview,{version:1,sourceHash:createHash('sha256').update('TOKEN=synthetic-input\n').digest('hex')});
+    await fs.writeFile(plan,JSON.stringify(preview));
+    out=await f.cli(['import','apply','--file',file,'--plan',plan]); assert.equal(out.code,1); assert.match(out.stderr,/invalid_plan/);
+    assert.deepEqual(await f.store.listSecrets(preview.environmentId),[]);
   } finally { await f.close(); }
 });
 
