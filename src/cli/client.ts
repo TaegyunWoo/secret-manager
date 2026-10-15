@@ -6,7 +6,11 @@ import { AppError } from '../shared/errors.js';
 export function cloudflared(args: string[]): Promise<string> {
   return new Promise((resolve,reject) => execFile('cloudflared',args,{timeout:120000,maxBuffer:65536,encoding:'utf8'},(error,stdout) => error ? reject(new Error('access_failed')) : resolve(stdout.trim())));
 }
-export async function login(config: Config): Promise<void> { await cloudflared(['access','login',config.adminUrl]); }
+export async function login(config: Config): Promise<void> {
+  await cloudflared(['access','login',config.adminUrl]);
+  const token = await cloudflared(['access','token','--app',config.adminUrl]).catch(() => fail('login_required'));
+  if (!token || /[\r\n\0]/.test(token)) fail('login_required');
+}
 
 // 100 x 64 KiB values may each expand sixfold in JSON; 40 MiB bounds that maximum.
 const adminErrors = new Set(['invalid_input','not_found','conflict','chunk_required','payload_too_large','operation_expired','storage_error','configuration_error']);

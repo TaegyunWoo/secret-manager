@@ -43,6 +43,14 @@ test('management client uses owner authentication and versioned writes without e
   } finally { process.env.PATH = original; await f.close(); }
 });
 
+test('login refuses success when cloudflared exits without a usable cached token', async () => {
+  const f=await agentFixture();
+  try {
+    const out=await f.cli(['login','--admin-url',f.url],{extra:{CF_TOKEN_FAIL:'1'}});
+    assert.equal(out.code,1); assert.match(out.stderr,/login_required/); assert.equal(out.stdout,'');
+  } finally { await f.close(); }
+});
+
 test('new app bootstraps without mappings, binds exact env/file values and runs from its saved connection', async () => {
   const f = await agentFixture();
   try {

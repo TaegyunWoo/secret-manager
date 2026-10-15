@@ -31,7 +31,7 @@ export async function agentFixture() {
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const bin = join(dir, 'bin'); await fs.mkdir(bin);
-  await fs.writeFile(join(bin, 'cloudflared'), `#!${process.execPath}\nif(process.env.CF_FAIL)process.exit(1);process.stdout.write(${JSON.stringify(token)});\n`, { mode: 0o700 });
+  await fs.writeFile(join(bin, 'cloudflared'), `#!${process.execPath}\nif(process.env.CF_FAIL || (process.env.CF_TOKEN_FAIL && process.argv[3]==='token'))process.exit(1);process.stdout.write(${JSON.stringify(token)});\n`, { mode: 0o700 });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_CONFIG_HOME: join(dir, 'settings'), TMPDIR: dir };
   const app = join(dir, 'new-app'); await fs.mkdir(app);
   const store = new Store(data.db, JSON.parse(config.KEYRING_JSON), config.ACTIVE_KEY_ID);
